@@ -61,7 +61,7 @@ function extractFieldsFromText(text: string): PdfFields {
 
   // Fallback patterns
   if (!customerDrawingNo) {
-    const cdMatch = text.match(/([A-Z]{1,4}\s\d{2,5})/);
+    const cdMatch = text.match(/([A-ZÄÖÜa-zäöüß]{1,4}\s\d{2,5})/);
     if (cdMatch) customerDrawingNo = cdMatch[1].replace(/\s+/, "");
   }
 
@@ -71,17 +71,31 @@ function extractFieldsFromText(text: string): PdfFields {
   }
 
   if (!customer) {
-    const custMatch = text.match(/(?:für Kunde|for customer|pour client)[^\n]*\n\s*([A-Za-z][A-Za-z\s&.-]{2,30})/i);
+    const custMatch = text.match(
+      /(?:für Kunde|for customer|pour client)[^\n]*\n\s*([A-ZÄÖÜa-zäöüß][A-Za-zÄÖÜäöüß\s&.-]{2,30})/i
+    );
     if (custMatch) customer = custMatch[1].trim();
   }
 
   return { customer, customerDrawingNo, orderNo };
 }
 
+function transliterateGerman(s: string): string {
+  return s
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/Ä/g, "Ae")
+    .replace(/Ö/g, "Oe")
+    .replace(/Ü/g, "Ue")
+    .replace(/ß/g, "ss");
+}
+
 function buildNewName(fields: PdfFields): string | null {
   const { customer, customerDrawingNo, orderNo } = fields;
   if (!customer || !customerDrawingNo || !orderNo) return null;
-  const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, "").trim();
+  const safe = (s: string) =>
+    transliterateGerman(s).replace(/[^A-Za-z0-9_-]/g, "").trim();
   return `${safe(customer)}_${safe(customerDrawingNo)}_${safe(orderNo)}.pdf`;
 }
 
