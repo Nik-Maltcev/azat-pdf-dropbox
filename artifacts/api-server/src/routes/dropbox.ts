@@ -30,12 +30,12 @@ function extractFieldsFromText(text: string): PdfFields {
   let orderNo: string | null = null;
 
   // Match label lines (allow extra spaces inside words due to PDF extraction artefacts)
-  const CUST_LABEL    = /\bkunde\b|for\s+cus\s*tomer|pour\s+c[l\s]+i\s*ent/i;
+  const CUST_LABEL    = /\bkunde\b|f\s*o\s*r\s+cus\s*t\s*o\s*m\s*e\s*r|pour\s+c[l\s]+i\s*ent/i;
   const CD_LABEL      = /kunden\s*[-–]?\s*zeichnungs\s*[-–]?\s*nr|customer\s+drawing\s+no|ref\s*\.?\s*du\s+plan\s+client/i;
   const ORDER_LABEL   = /bestell\s*[-–]?\s*nr|part\s+no/i;
 
   // Lines that look like labels/headers (skip them as value candidates)
-  const IS_LABEL      = /\bkunde\b|for\s+cus|pour\s+c[l\s]|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|machine|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr/i;
+  const IS_LABEL      = /\bkunde\b|f\s*o\s*r\s+cus|pour\s+c[l\s]|^pour\b|^c\s*l\s*i\s*ent\b|^i\s*ent\b|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|^machine\b|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr|gelenkwelle|kupplung|^clutch\b|^limiteur\b|^pto\b|transm|^seite\b|^page\b|benennung/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -59,14 +59,15 @@ function extractFieldsFromText(text: string): PdfFields {
 
     // ── Customer drawing no ───────────────────────────────────────────────────
     if (!customerDrawingNo && CD_LABEL.test(line)) {
-      for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
         const raw = lines[j].split(/\s{3,}/)[0].trim();
         // Strip internal spaces (e.g. "801 2479" → "8012479")
         const candidate = raw.replace(/\s+/g, "");
         if (
           candidate.length >= 3 &&
+          /^[\dA-Za-zÄÖÜäöüß]/.test(candidate) && // must start with alphanumeric
           !IS_LABEL.test(raw) &&
-          /[\dA-Za-z]/.test(candidate)
+          /[\dA-Za-z]{2}/.test(candidate)          // must contain at least 2 alnum chars
         ) {
           customerDrawingNo = candidate;
           break;
@@ -85,13 +86,25 @@ function extractFieldsFromText(text: string): PdfFields {
         for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
           const tokens = lines[j].split(/\s+/).filter(Boolean);
           const firstToken = tokens[0] || "";
+
+          // Direct match
           if (/^\d{5,}$/.test(firstToken)) {
             orderNo = firstToken;
-            // If second token looks like a drawing number (e.g. "56.136.51"), capture it as fallback
+            // Second token looks like a drawing number (e.g. "56.136.51") → capture as fallback
             if (!customerDrawingNo && tokens[1] && /^\d+[\.\-]\d+/.test(tokens[1])) {
               customerDrawingNo = tokens[1].replace(/\./g, "-");
             }
             break;
+          }
+
+          // OCR space-in-number: "1 02038" → all tokens are digits → join them
+          const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
+          if (digitTokens.length > 1) {
+            const joined = digitTokens.join("");
+            if (/^\d{5,8}$/.test(joined)) {
+              orderNo = joined;
+              break;
+            }
           }
         }
       }
