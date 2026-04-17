@@ -29,52 +29,90 @@ function extractFieldsFromText(text: string): PdfFields {
   let customerDrawingNo: string | null = null;
   let orderNo: string | null = null;
 
+  // Match label lines (allow extra spaces inside words due to PDF extraction artefacts)
+  const CUST_LABEL    = /für\s+kunde|for\s+cus\s*tomer|pour\s+c[l\s]+i\s*ent/i;
+  const CD_LABEL      = /kunden\s*[-–]?\s*zeichnungs\s*[-–]?\s*nr|customer\s+drawing\s+no|ref\s*\.?\s*du\s+plan\s+client/i;
+  const ORDER_LABEL   = /bestell\s*[-–]?\s*nr|part\s+no/i;
+
+  // Lines that look like labels/headers (skip them as value candidates)
+  const IS_LABEL      = /für\s*kunde|for\s+cus|pour\s+c[l\s]|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|machine|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr/i;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    if (/für kunde|for customer|pour client/i.test(line)) {
-      const nextLine = lines[i + 1] || "";
-      if (nextLine && !/für kunde|for customer|pour client|kunden|zeichnungs/i.test(nextLine)) {
-        customer = customer || nextLine.split(/\s{2,}/)[0].trim();
-      }
-    }
-
-    if (/Kunden-Zeichnungs-Nr|Customer drawing No|Réf\. du plan/i.test(line)) {
-      const nextVal = lines[i + 1] || "";
-      if (nextVal && !/Kunden|Customer|Réf|drawing/i.test(nextVal)) {
-        customerDrawingNo = customerDrawingNo || nextVal.split(/\s{2,}/)[0].trim();
-      }
-    }
-
-    if (/Bestell-Nr|Part No|Reference/i.test(line)) {
-      const nextVal = lines[i + 1] || "";
-      if (nextVal && !/Bestell|Part No|Reference/i.test(nextVal)) {
-        const candidate = nextVal.split(/\s{2,}/)[0].trim();
-        if (/^\d{5,}$/.test(candidate)) {
-          orderNo = orderNo || candidate;
+    // ── Customer ──────────────────────────────────────────────────────────────
+    if (!customer && CUST_LABEL.test(line)) {
+      // Search next 1-4 lines for a real company name
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        // Take the first column (before 3+ spaces if multi-column line)
+        const candidate = lines[j].split(/\s{3,}/)[0].trim();
+        if (
+          candidate.length >= 3 &&
+          /[A-Za-zÄÖÜäöüß]{2}/.test(candidate) &&
+          !IS_LABEL.test(candidate)
+        ) {
+          customer = candidate;
+          break;
         }
       }
-      const sameLineMatch = line.match(/(?:Bestell-Nr|Part No|Reference)[.:]\s*(\d{5,})/i);
-      if (sameLineMatch) orderNo = orderNo || sameLineMatch[1];
+    }
+
+    // ── Customer drawing no ───────────────────────────────────────────────────
+    if (!customerDrawingNo && CD_LABEL.test(line)) {
+      for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+        const raw = lines[j].split(/\s{3,}/)[0].trim();
+        // Strip internal spaces (e.g. "801 2479" → "8012479")
+        const candidate = raw.replace(/\s+/g, "");
+        if (
+          candidate.length >= 3 &&
+          !IS_LABEL.test(raw) &&
+          /[\dA-Za-z]/.test(candidate)
+        ) {
+          customerDrawingNo = candidate;
+          break;
+        }
+      }
+    }
+
+    // ── Order no ──────────────────────────────────────────────────────────────
+    if (!orderNo && ORDER_LABEL.test(line)) {
+      // Same-line value: "Part No. 101399" or "Bestell-Nr.: 101399"
+      const sameLineMatch = line.match(/(?:bestell\s*[-–]?\s*nr|part\s+no)[.\s:]*(\d{5,})/i);
+      if (sameLineMatch) {
+        orderNo = sameLineMatch[1];
+      } else {
+        // Value on next lines
+        for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+          const candidate = lines[j].split(/\s{3,}/)[0].trim();
+          if (/^\d{5,}$/.test(candidate)) {
+            orderNo = candidate;
+            break;
+          }
+        }
+      }
     }
   }
 
-  // Fallback patterns
+  // ── Fallbacks ──────────────────────────────────────────────────────────────
+
+  // Customer drawing no: look for pattern like "ABC 1234" or "AB12345"
   if (!customerDrawingNo) {
-    const cdMatch = text.match(/([A-ZÄÖÜa-zäöüß]{1,4}\s\d{2,5})/);
-    if (cdMatch) customerDrawingNo = cdMatch[1].replace(/\s+/, "");
+    const m = text.match(/\b([A-ZÄÖÜ]{2,5}\s*\d{3,7})\b/);
+    if (m) customerDrawingNo = m[1].replace(/\s+/g, "");
   }
 
+  // Order no: first standalone 6-8 digit number
   if (!orderNo) {
-    const onMatch = text.match(/\b(\d{6,8})\b/);
-    if (onMatch) orderNo = onMatch[1];
+    const m = text.match(/\b(\d{6,8})\b/);
+    if (m) orderNo = m[1];
   }
 
+  // Customer: multi-word title-case string after label keyword (cross-line fallback)
   if (!customer) {
-    const custMatch = text.match(
-      /(?:für Kunde|for customer|pour client)[^\n]*\n\s*([A-ZÄÖÜa-zäöüß][A-Za-zÄÖÜäöüß\s&.-]{2,30})/i
+    const m = text.match(
+      /(?:für\s+Kunde|for\s+cus\s*tomer|pour\s+cl[i\s]+ent)[^\n]*\n\s*([A-ZÄÖÜa-zäöüß][A-Za-zÄÖÜäöüß\s&.()\-]{2,35})/i
     );
-    if (custMatch) customer = custMatch[1].trim();
+    if (m) customer = m[1].trim();
   }
 
   return { customer, customerDrawingNo, orderNo };
