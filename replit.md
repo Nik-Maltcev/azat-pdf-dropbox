@@ -25,3 +25,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Dropbox Integration Note
+
+The Dropbox OAuth integration was dismissed by the user. Instead, the app uses a Dropbox Access Token stored as a secret (`DROPBOX_ACCESS_TOKEN`). If this stops working in the future, try the Replit Dropbox connector (`connector:ccfg_dropbox_01K49RKF1K3H5YEV4A3QXW28XT`) instead.
