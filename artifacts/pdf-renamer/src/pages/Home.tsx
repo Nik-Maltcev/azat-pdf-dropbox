@@ -32,6 +32,15 @@ interface RenameResult {
 
 type FilterType = "all" | "ready" | "unresolved" | "error";
 
+interface InspectResult {
+  path: string;
+  fields: PdfFields;
+  newName: string | null;
+  hexSample: string;
+  lines: string[];
+  rawTextLength: number;
+}
+
 const PAGE_SIZE = 100;
 
 export default function Home() {
@@ -48,6 +57,9 @@ export default function Home() {
   const [renameResults, setRenameResults] = useState<Record<string, RenameResult>>({});
   const [filter, setFilter] = useState<FilterType>("all");
   const [page, setPage] = useState(0);
+  const [inspecting, setInspecting] = useState<string | null>(null);
+  const [inspectResult, setInspectResult] = useState<InspectResult | null>(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
 
@@ -184,6 +196,22 @@ export default function Home() {
 
   const totalPages = Math.ceil(filteredFiles.length / PAGE_SIZE);
   const pageFiles = filteredFiles.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  async function openInspect(path: string) {
+    setInspecting(path);
+    setInspectResult(null);
+    setInspectLoading(true);
+    try {
+      const res = await fetch(`${BASE}/api/dropbox/inspect?path=${encodeURIComponent(path)}`);
+      const data = await res.json();
+      setInspectResult(data);
+    } catch (e: any) {
+      toast({ title: "Ошибка инспекции", description: e.message, variant: "destructive" });
+      setInspecting(null);
+    } finally {
+      setInspectLoading(false);
+    }
+  }
 
   const readyCount = files.filter((f) => f.status === "ready").length;
   const unresolvedCount = files.filter((f) => f.status === "unresolved").length;
@@ -407,6 +435,15 @@ export default function Home() {
                           <p className="text-xs text-destructive">{file.error ?? result?.error}</p>
                         )}
                       </div>
+                      <button
+                        onClick={() => openInspect(file.path)}
+                        title="Показать сырой текст PDF"
+                        className="ml-2 shrink-0 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M10 21h7a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v4m0 0v6m0-6H3m4 0h4M3 15l2 2 4-4" />
+                        </svg>
+                      </button>
                     </div>
                   </div>
                 );
@@ -438,6 +475,93 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* Inspect modal */}
+      {inspecting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-card border border-card-border rounded-2xl shadow-lg w-full max-w-3xl max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-foreground">Содержимое PDF</h2>
+                <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">{inspecting}</p>
+              </div>
+              <button
+                onClick={() => { setInspecting(null); setInspectResult(null); }}
+                className="ml-4 p-1.5 rounded-lg hover:bg-muted transition text-muted-foreground hover:text-foreground shrink-0"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+              {inspectLoading && (
+                <div className="flex items-center gap-3 text-muted-foreground py-8 justify-center">
+                  <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                  Загрузка и парсинг PDF...
+                </div>
+              )}
+              {inspectResult && (
+                <>
+                  <div className="bg-muted/30 rounded-xl p-4 space-y-2">
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Извлечённые поля</h3>
+                    <div className="grid grid-cols-3 gap-3 text-sm">
+                      <div>
+                        <div className="text-xs text-muted-foreground">Клиент</div>
+                        <div className={`font-medium ${inspectResult.fields.customer ? "text-foreground" : "text-destructive"}`}>
+                          {inspectResult.fields.customer ?? "не найдено"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-muted-foreground">Чертёж клиента</div>
+                        <div className={`font-medium ${inspectResult.fields.customerDrawingNo ? "text-foreground" : "text-destructive"}`}>
+                          {inspectResult.fields.customerDrawingNo ?? "не найдено"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-muted-foreground">Номер заказа</div>
+                        <div className={`font-medium ${inspectResult.fields.orderNo ? "text-foreground" : "text-destructive"}`}>
+                          {inspectResult.fields.orderNo ?? "не найдено"}
+                        </div>
+                      </div>
+                    </div>
+                    {inspectResult.newName && (
+                      <div className="text-sm pt-2 border-t border-border">
+                        <span className="text-muted-foreground">Новое имя: </span>
+                        <span className="font-mono font-semibold text-green-700">{inspectResult.newName}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Кодировка (первые 200 символов — non-ASCII выделены в [скобках])
+                    </h3>
+                    <pre className="text-xs bg-gray-900 text-green-300 rounded-xl p-3 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
+                      {inspectResult.hexSample}
+                    </pre>
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Строки текста (первые 80, всего {inspectResult.rawTextLength.toLocaleString()} символов)
+                    </h3>
+                    <div className="bg-gray-50 border border-border rounded-xl overflow-hidden">
+                      {inspectResult.lines.map((line, i) => (
+                        <div key={i} className={`flex gap-3 px-3 py-1 text-xs font-mono ${i % 2 === 0 ? "bg-white" : "bg-gray-50"}`}>
+                          <span className="text-muted-foreground w-6 shrink-0 text-right">{i + 1}</span>
+                          <span className="text-foreground break-all">{line}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -104,7 +104,8 @@ async function processOnePdf(dbx: Dropbox, file: { path_lower: string; name: str
     const dlRes = await dbx.filesDownload({ path: file.path_lower });
     const buffer = (dlRes.result as any).fileBinary as Buffer;
     const parsed = await pdfParse(buffer);
-    const fields = extractFieldsFromText(parsed.text);
+    // NFC normalization fixes umlauts stored as base-letter + combining diacritic
+    const fields = extractFieldsFromText(parsed.text.normalize("NFC"));
     const newName = buildNewName(fields);
     return {
       id: file.id,
@@ -264,6 +265,45 @@ router.post("/dropbox/rename", async (req: Request, res: Response) => {
   });
 
   res.json({ results: mu.filter(Boolean) });
+});
+
+// GET /api/dropbox/inspect?path=... — returns raw extracted text for debugging
+router.get("/dropbox/inspect", async (req: Request, res: Response) => {
+  const filePath = req.query.path as string;
+  if (!filePath) {
+    res.status(400).json({ error: "path query parameter is required" });
+    return;
+  }
+  try {
+    const dbx = getDropboxClient();
+    const dlRes = await dbx.filesDownload({ path: filePath });
+    const buffer = (dlRes.result as any).fileBinary as Buffer;
+    const parsed = await pdfParse(buffer);
+
+    // Show both raw and NFC-normalized text
+    const rawText = parsed.text;
+    const normalizedText = rawText.normalize("NFC");
+    const lines = normalizedText.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    const fields = extractFieldsFromText(normalizedText);
+    const newName = buildNewName(fields);
+
+    // Show hex codes for first 500 chars to debug encoding
+    const hexSample = Array.from(rawText.slice(0, 200)).map((c: string) => {
+      const code = c.codePointAt(0)!;
+      return code > 127 ? `[U+${code.toString(16).toUpperCase().padStart(4, "0")} ${c}]` : c;
+    }).join("");
+
+    res.json({
+      path: filePath,
+      fields,
+      newName,
+      hexSample,
+      lines: lines.slice(0, 80),
+      rawTextLength: rawText.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
