@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import { Dropbox } from "dropbox";
 
-// pdf-parse is a CJS module, externalized from esbuild bundle
+// pdf-parse v1 is a CJS module externalized from esbuild, loaded at runtime
+// v1 exports a function directly as module.exports
 const pdfParse: (buffer: Buffer) => Promise<{ text: string }> = (globalThis as any).require("pdf-parse");
 
 const router = Router();
