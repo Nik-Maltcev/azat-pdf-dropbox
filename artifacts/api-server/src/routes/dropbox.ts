@@ -30,12 +30,12 @@ function extractFieldsFromText(text: string): PdfFields {
   let orderNo: string | null = null;
 
   // Match label lines (allow extra spaces inside words due to PDF extraction artefacts)
-  const CUST_LABEL    = /für\s+kunde|for\s+cus\s*tomer|pour\s+c[l\s]+i\s*ent/i;
+  const CUST_LABEL    = /\bkunde\b|for\s+cus\s*tomer|pour\s+c[l\s]+i\s*ent/i;
   const CD_LABEL      = /kunden\s*[-–]?\s*zeichnungs\s*[-–]?\s*nr|customer\s+drawing\s+no|ref\s*\.?\s*du\s+plan\s+client/i;
   const ORDER_LABEL   = /bestell\s*[-–]?\s*nr|part\s+no/i;
 
   // Lines that look like labels/headers (skip them as value candidates)
-  const IS_LABEL      = /für\s*kunde|for\s+cus|pour\s+c[l\s]|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|machine|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr/i;
+  const IS_LABEL      = /\bkunde\b|for\s+cus|pour\s+c[l\s]|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|machine|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -74,18 +74,23 @@ function extractFieldsFromText(text: string): PdfFields {
       }
     }
 
-    // ── Order no ──────────────────────────────────────────────────────────────
+    // ── Order no (+ bonus: catch adjacent Zeichnungs-Nr.) ────────────────────
     if (!orderNo && ORDER_LABEL.test(line)) {
       // Same-line value: "Part No. 101399" or "Bestell-Nr.: 101399"
       const sameLineMatch = line.match(/(?:bestell\s*[-–]?\s*nr|part\s+no)[.\s:]*(\d{5,})/i);
       if (sameLineMatch) {
         orderNo = sameLineMatch[1];
       } else {
-        // Value on next lines
-        for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-          const candidate = lines[j].split(/\s{3,}/)[0].trim();
-          if (/^\d{5,}$/.test(candidate)) {
-            orderNo = candidate;
+        // Value on next lines (look up to 5 lines ahead — number may be separated by label rows)
+        for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+          const tokens = lines[j].split(/\s+/).filter(Boolean);
+          const firstToken = tokens[0] || "";
+          if (/^\d{5,}$/.test(firstToken)) {
+            orderNo = firstToken;
+            // If second token looks like a drawing number (e.g. "56.136.51"), capture it as fallback
+            if (!customerDrawingNo && tokens[1] && /^\d+[\.\-]\d+/.test(tokens[1])) {
+              customerDrawingNo = tokens[1].replace(/\./g, "-");
+            }
             break;
           }
         }
