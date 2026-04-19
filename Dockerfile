@@ -17,9 +17,7 @@ COPY lib/api-spec/package.json lib/api-spec/
 
 COPY artifacts/api-server/package.json artifacts/api-server/
 COPY artifacts/pdf-renamer/package.json artifacts/pdf-renamer/
-
-# mockup-sandbox is in .dockerignore but pnpm workspace expects it
-RUN mkdir -p artifacts/mockup-sandbox && echo '{"name":"@workspace/mockup-sandbox","version":"0.0.0","private":true}' > artifacts/mockup-sandbox/package.json
+COPY artifacts/mockup-sandbox/package.json artifacts/mockup-sandbox/
 
 COPY scripts/package.json scripts/
 

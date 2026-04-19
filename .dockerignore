@@ -8,7 +8,6 @@ dist
 replit.md
 .agents
 attached_assets
-artifacts/mockup-sandbox
 artifacts/api-server/dist
 artifacts/pdf-renamer/dist
 *.tsbuildinfo
