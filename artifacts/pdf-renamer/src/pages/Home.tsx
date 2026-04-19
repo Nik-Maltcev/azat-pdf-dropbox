@@ -67,8 +67,68 @@ export default function Home() {
 
   const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
+  // Poll a job for results — used both by startScan and resume on page load
+  const pollJob = useCallback((jobId: string, initialCursor = 0) => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    jobIdRef.current = jobId;
+    let cursor = initialCursor;
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BASE}/api/dropbox/scan/status?jobId=${jobId}&cursor=${cursor}`);
+        if (!statusRes.ok) return;
+        const data = await statusRes.json();
+
+        if (data.total > 0) setTotal(data.total);
+        setProcessed(data.processed);
+
+        if (data.files.length > 0) {
+          cursor = data.cursor;
+          setFiles((prev) => [...prev, ...data.files]);
+          const readyPaths = data.files.filter((f: any) => f.status === "ready").map((f: any) => f.path);
+          if (readyPaths.length > 0) {
+            setSelected((prev) => {
+              const next = new Set(prev);
+              for (const p of readyPaths) next.add(p);
+              return next;
+            });
+          }
+        }
+
+        if (data.status === "listing") {
+          setStatusMsg("Получаем список файлов из Dropbox...");
+        } else if (data.status === "processing") {
+          setStatusMsg(`Обработка: ${data.processed} из ${data.total} файлов...`);
+        } else if (data.status === "done") {
+          setDone(true);
+          setScanning(false);
+          setStatusMsg(`Готово. Обработано: ${data.processed} из ${data.total} файлов.`);
+          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          localStorage.removeItem("scanJobId");
+        } else if (data.status === "error") {
+          setScanning(false);
+          setStatusMsg(`Ошибка: ${data.error}`);
+          toast({ title: "Ошибка сканирования", description: data.error, variant: "destructive" });
+          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          localStorage.removeItem("scanJobId");
+        }
+      } catch {
+        // Network error during poll — keep trying
+      }
+    }, 2000);
+  }, [BASE, toast]);
+
+  // Resume polling on page load if there's an active job
+  useState(() => {
+    const savedJobId = localStorage.getItem("scanJobId");
+    if (savedJobId) {
+      setScanning(true);
+      setStatusMsg("Восстановление сканирования...");
+      pollJob(savedJobId, 0);
+    }
+  });
+
   const startScan = useCallback(async () => {
-    // Clean up previous poll
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
 
     setFiles([]);
@@ -86,57 +146,14 @@ export default function Home() {
       const res = await fetch(`${BASE}/api/dropbox/scan/start`, { method: "POST" });
       if (!res.ok) throw new Error("Failed to start scan");
       const { jobId } = await res.json();
-      jobIdRef.current = jobId;
-
-      let cursor = 0;
-
-      pollRef.current = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${BASE}/api/dropbox/scan/status?jobId=${jobId}&cursor=${cursor}`);
-          if (!statusRes.ok) return;
-          const data = await statusRes.json();
-
-          if (data.total > 0) setTotal(data.total);
-          setProcessed(data.processed);
-
-          if (data.files.length > 0) {
-            cursor = data.cursor;
-            setFiles((prev) => [...prev, ...data.files]);
-            const readyPaths = data.files.filter((f: any) => f.status === "ready").map((f: any) => f.path);
-            if (readyPaths.length > 0) {
-              setSelected((prev) => {
-                const next = new Set(prev);
-                for (const p of readyPaths) next.add(p);
-                return next;
-              });
-            }
-          }
-
-          if (data.status === "listing") {
-            setStatusMsg("Получаем список файлов из Dropbox...");
-          } else if (data.status === "processing") {
-            setStatusMsg(`Обработка: ${data.processed} из ${data.total} файлов...`);
-          } else if (data.status === "done") {
-            setDone(true);
-            setScanning(false);
-            setStatusMsg(`Готово. Обработано: ${data.processed} из ${data.total} файлов.`);
-            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          } else if (data.status === "error") {
-            setScanning(false);
-            setStatusMsg(`Ошибка: ${data.error}`);
-            toast({ title: "Ошибка сканирования", description: data.error, variant: "destructive" });
-            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          }
-        } catch {
-          // Network error during poll — keep trying
-        }
-      }, 2000);
+      localStorage.setItem("scanJobId", jobId);
+      pollJob(jobId, 0);
     } catch (e: any) {
       setScanning(false);
       setStatusMsg("");
       toast({ title: "Ошибка запуска", description: e.message, variant: "destructive" });
     }
-  }, [BASE, toast]);
+  }, [BASE, toast, pollJob]);
 
   async function renameSelected() {
     const toRename = files
