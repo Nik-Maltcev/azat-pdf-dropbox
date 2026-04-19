@@ -286,9 +286,11 @@ export default function Home() {
             setAiResolving(false);
 
             if (data.status === "done") {
-              const totalResolved = files.filter((f) => f.status === "unresolved").length - (data.total - data.results.filter((r: any) => r.status === "ready").length);
+              const aiReady = data.results?.filter((r: any) => r.status === "ready").length ?? 0;
+              const aiUnresolved = data.results?.filter((r: any) => r.status === "unresolved").length ?? 0;
+              const aiError = data.results?.filter((r: any) => r.status === "error").length ?? 0;
               setStatusMsg("");
-              toast({ title: `ИИ завершил: ${data.processed} из ${data.total}` });
+              toast({ title: `ИИ: распознано ${aiReady}, не удалось ${aiUnresolved}, ошибок ${aiError}` });
             } else {
               toast({ title: "Ошибка ИИ", description: data.error, variant: "destructive" });
             }
