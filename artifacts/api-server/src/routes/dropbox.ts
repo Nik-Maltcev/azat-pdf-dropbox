@@ -8,7 +8,7 @@ const pdfParse: (buffer: Buffer) => Promise<{ text: string }> = (globalThis as a
 const router = Router();
 
 const DROPBOX_FOLDER = "/Walterscheid";
-const BATCH_CONCURRENCY = 5; // concurrent downloads (conservative to avoid 429)
+const BATCH_CONCURRENCY = 10; // concurrent downloads
 
 function getDropboxClient(): Dropbox {
   const token = process.env.DROPBOX_ACCESS_TOKEN;
