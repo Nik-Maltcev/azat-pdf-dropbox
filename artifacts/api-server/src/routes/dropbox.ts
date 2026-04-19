@@ -346,6 +346,22 @@ router.delete("/dropbox/scan/job", (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// POST /api/dropbox/scan/update-files — update files in job (e.g. after AI resolve)
+router.post("/dropbox/scan/update-files", (req: Request, res: Response) => {
+  const { jobId, files } = req.body as { jobId: string; files: ProcessedFile[] };
+  if (!jobId || !jobs.has(jobId)) { res.status(404).json({ error: "Job not found" }); return; }
+  if (!Array.isArray(files)) { res.status(400).json({ error: "files array required" }); return; }
+
+  const job = jobs.get(jobId)!;
+  for (const updated of files) {
+    const idx = job.files.findIndex((f) => f.path === updated.path);
+    if (idx >= 0) {
+      job.files[idx] = updated;
+    }
+  }
+  res.json({ ok: true });
+});
+
 // ── Rename ──────────────────────────────────────────────────────────────────
 
 router.post("/dropbox/rename", async (req: Request, res: Response) => {

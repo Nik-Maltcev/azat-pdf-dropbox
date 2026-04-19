@@ -76,7 +76,16 @@ export default function Home() {
     pollRef.current = setInterval(async () => {
       try {
         const statusRes = await fetch(`${BASE}/api/dropbox/scan/status?jobId=${jobId}&cursor=${cursor}`);
-        if (!statusRes.ok) return;
+        if (!statusRes.ok) {
+          // Job not found on server (e.g. server restarted)
+          if (statusRes.status === 404) {
+            setScanning(false);
+            setStatusMsg("Сервер перезапустился. Запустите сканирование заново.");
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+            localStorage.removeItem("scanJobId");
+          }
+          return;
+        }
         const data = await statusRes.json();
 
         if (data.total > 0) setTotal(data.total);
@@ -103,14 +112,13 @@ export default function Home() {
           setDone(true);
           setScanning(false);
           setStatusMsg(`Готово. Обработано: ${data.processed} из ${data.total} файлов.`);
+          // Keep jobId in localStorage so page reload can restore results!
           if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          localStorage.removeItem("scanJobId");
         } else if (data.status === "error") {
           setScanning(false);
           setStatusMsg(`Ошибка: ${data.error}`);
           toast({ title: "Ошибка сканирования", description: data.error, variant: "destructive" });
           if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-          localStorage.removeItem("scanJobId");
         }
       } catch {
         // Network error during poll — keep trying
@@ -118,12 +126,12 @@ export default function Home() {
     }, 2000);
   }, [BASE, toast]);
 
-  // Resume polling on page load if there's an active job
+  // Resume from last job on page load
   useState(() => {
     const savedJobId = localStorage.getItem("scanJobId");
     if (savedJobId) {
       setScanning(true);
-      setStatusMsg("Восстановление сканирования...");
+      setStatusMsg("Восстановление данных...");
       pollJob(savedJobId, 0);
     }
   });
@@ -263,6 +271,16 @@ export default function Home() {
             for (const r of resolved) next.add(r.path);
             return next;
           });
+        }
+
+        // Persist AI results in server job so page reload keeps them
+        const savedJobId = localStorage.getItem("scanJobId");
+        if (savedJobId) {
+          fetch(`${BASE}/api/dropbox/scan/update-files`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId: savedJobId, files: json.results }),
+          }).catch(() => {});
         }
       }
 
