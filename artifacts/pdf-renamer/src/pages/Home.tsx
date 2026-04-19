@@ -62,12 +62,15 @@ export default function Home() {
   const [inspectLoading, setInspectLoading] = useState(false);
   const [aiResolving, setAiResolving] = useState(false);
 
-  const esRef = useRef<EventSource | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const jobIdRef = useRef<string | null>(null);
 
   const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-  const startScan = useCallback(() => {
-    if (esRef.current) esRef.current.close();
+  const startScan = useCallback(async () => {
+    // Clean up previous poll
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+
     setFiles([]);
     setSelected(new Set());
     setRenameResults({});
@@ -77,76 +80,63 @@ export default function Home() {
     setFilter("all");
     setPage(0);
     setScanning(true);
-    setStatusMsg("Подключение к Dropbox...");
+    setStatusMsg("Запуск сканирования...");
 
-    const es = new EventSource(`${BASE}/api/dropbox/scan`);
-    esRef.current = es;
+    try {
+      const res = await fetch(`${BASE}/api/dropbox/scan/start`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to start scan");
+      const { jobId } = await res.json();
+      jobIdRef.current = jobId;
 
-    es.addEventListener("status", (e) => {
-      const d = JSON.parse(e.data);
-      setStatusMsg(d.message);
-    });
+      let cursor = 0;
 
-    es.addEventListener("listing", (e) => {
-      const d = JSON.parse(e.data);
-      setStatusMsg(`Получаем список: найдено ${d.found} PDF...`);
-    });
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${BASE}/api/dropbox/scan/status?jobId=${jobId}&cursor=${cursor}`);
+          if (!statusRes.ok) return;
+          const data = await statusRes.json();
 
-    es.addEventListener("total", (e) => {
-      const d = JSON.parse(e.data);
-      setTotal(d.total);
-      setStatusMsg(`Начинаем обработку ${d.total} файлов...`);
-    });
+          if (data.total > 0) setTotal(data.total);
+          setProcessed(data.processed);
 
-    es.addEventListener("file", (e) => {
-      const d: PdfFile = JSON.parse(e.data);
-      setProcessed(d.processed);
-      setFiles((prev) => [...prev, d]);
-      if (d.status === "ready") {
-        setSelected((prev) => {
-          const next = new Set(prev);
-          next.add(d.path);
-          return next;
-        });
-      }
-    });
+          if (data.files.length > 0) {
+            cursor = data.cursor;
+            setFiles((prev) => [...prev, ...data.files]);
+            const readyPaths = data.files.filter((f: any) => f.status === "ready").map((f: any) => f.path);
+            if (readyPaths.length > 0) {
+              setSelected((prev) => {
+                const next = new Set(prev);
+                for (const p of readyPaths) next.add(p);
+                return next;
+              });
+            }
+          }
 
-    es.addEventListener("batch", (e) => {
-      const d: { files: PdfFile[]; processed: number; total: number } = JSON.parse(e.data);
-      setProcessed(d.processed);
-      setFiles((prev) => [...prev, ...d.files]);
-      const readyPaths = d.files.filter((f) => f.status === "ready").map((f) => f.path);
-      if (readyPaths.length > 0) {
-        setSelected((prev) => {
-          const next = new Set(prev);
-          for (const p of readyPaths) next.add(p);
-          return next;
-        });
-      }
-    });
-
-    es.addEventListener("done", (e) => {
-      const d = JSON.parse(e.data);
-      setDone(true);
+          if (data.status === "listing") {
+            setStatusMsg("Получаем список файлов из Dropbox...");
+          } else if (data.status === "processing") {
+            setStatusMsg(`Обработка: ${data.processed} из ${data.total} файлов...`);
+          } else if (data.status === "done") {
+            setDone(true);
+            setScanning(false);
+            setStatusMsg(`Готово. Обработано: ${data.processed} из ${data.total} файлов.`);
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          } else if (data.status === "error") {
+            setScanning(false);
+            setStatusMsg(`Ошибка: ${data.error}`);
+            toast({ title: "Ошибка сканирования", description: data.error, variant: "destructive" });
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          }
+        } catch {
+          // Network error during poll — keep trying
+        }
+      }, 2000);
+    } catch (e: any) {
       setScanning(false);
-      setStatusMsg(`Готово. Обработано: ${d.processed} из ${d.total} файлов.`);
-      es.close();
-    });
-
-    es.addEventListener("error", (e) => {
-      const d = JSON.parse((e as MessageEvent).data || '{"message":"Неизвестная ошибка"}');
-      setScanning(false);
-      setStatusMsg(`Ошибка: ${d.message}`);
-      toast({ title: "Ошибка сканирования", description: d.message, variant: "destructive" });
-      es.close();
-    });
-
-    es.onerror = () => {
-      if (done) return;
-      setScanning(false);
-      es.close();
-    };
-  }, [BASE, done, toast]);
+      setStatusMsg("");
+      toast({ title: "Ошибка запуска", description: e.message, variant: "destructive" });
+    }
+  }, [BASE, toast]);
 
   async function renameSelected() {
     const toRename = files
@@ -419,7 +409,7 @@ export default function Home() {
               />
             </div>
             {total > 0 && (
-              <p className="text-xs text-muted-foreground">{progress}% — обрабатывается по {15} файлов параллельно</p>
+              <p className="text-xs text-muted-foreground">{progress}% — обрабатывается по 10 файлов параллельно</p>
             )}
           </div>
         )}
