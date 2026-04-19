@@ -9,9 +9,52 @@ const router = Router();
 const DROPBOX_FOLDER = "/Walterscheid";
 const BATCH_CONCURRENCY = 5;
 
-function getDropboxClient(): Dropbox {
-  const token = process.env.DROPBOX_ACCESS_TOKEN;
-  if (!token) throw new Error("DROPBOX_ACCESS_TOKEN is not set");
+let cachedAccessToken: string | null = null;
+let tokenExpiresAt = 0;
+
+async function getAccessToken(): Promise<string> {
+  // If we have a static token, use it
+  const staticToken = process.env.DROPBOX_ACCESS_TOKEN;
+  if (staticToken && !process.env.DROPBOX_REFRESH_TOKEN) return staticToken;
+
+  // Refresh token flow
+  const refreshToken = process.env.DROPBOX_REFRESH_TOKEN;
+  const appKey = process.env.DROPBOX_APP_KEY;
+  const appSecret = process.env.DROPBOX_APP_SECRET;
+
+  if (!refreshToken || !appKey || !appSecret) {
+    throw new Error("Set DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET (or DROPBOX_ACCESS_TOKEN for static token)");
+  }
+
+  // Return cached token if still valid (with 5 min buffer)
+  if (cachedAccessToken && Date.now() < tokenExpiresAt - 300000) {
+    return cachedAccessToken;
+  }
+
+  const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: appKey,
+      client_secret: appSecret,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to refresh Dropbox token: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+  cachedAccessToken = data.access_token;
+  tokenExpiresAt = Date.now() + data.expires_in * 1000;
+  return cachedAccessToken!;
+}
+
+async function getDropboxClient(): Promise<Dropbox> {
+  const token = await getAccessToken();
   return new Dropbox({ accessToken: token });
 }
 
@@ -261,7 +304,7 @@ async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: n
 async function runScanJob(jobId: string) {
   const job = jobs.get(jobId)!;
   try {
-    const dbx = getDropboxClient();
+    const dbx = await getDropboxClient();
     job.status = "listing";
 
     const allPdfs: Array<{ path_lower: string; name: string; id: string }> = [];
@@ -381,7 +424,7 @@ router.post("/dropbox/rename", async (req: Request, res: Response) => {
   const { files } = req.body as { files: Array<{ path: string; newName: string }> };
   if (!Array.isArray(files) || files.length === 0) { res.status(400).json({ error: "files array is required" }); return; }
 
-  const dbx = getDropboxClient();
+  const dbx = await getDropboxClient();
   const mu = new Array(files.length).fill(null);
   const tasks = files.map((f) => async () => {
     try {
@@ -404,7 +447,7 @@ router.get("/dropbox/inspect", async (req: Request, res: Response) => {
   const filePath = req.query.path as string;
   if (!filePath) { res.status(400).json({ error: "path query parameter is required" }); return; }
   try {
-    const dbx = getDropboxClient();
+    const dbx = await getDropboxClient();
     const buffer = await downloadWithRetry(dbx, filePath);
     const parsed = await pdfParse(buffer);
     const rawText = parsed.text;
@@ -437,7 +480,7 @@ let aiJobCounter = 0;
 
 async function runAiJob(aiJobId: string, files: Array<{ path: string; originalName: string; id: string; fields: PdfFields }>, scanJobId?: string) {
   const aiJob = aiJobs.get(aiJobId)!;
-  const dbx = getDropboxClient();
+  const dbx = await getDropboxClient();
 
   const tasks = files.map((f) => async () => {
     try {
