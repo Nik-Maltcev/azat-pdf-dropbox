@@ -171,6 +171,62 @@ function extractFieldsFromText(text: string): PdfFields {
   return { customer, customerDrawingNo, orderNo };
 }
 
+async function extractFieldsWithAI(text: string): Promise<PdfFields> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return { customer: null, customerDrawingNo: null, orderNo: null };
+
+  // Truncate to ~3000 chars to save tokens
+  const truncated = text.slice(0, 3000);
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content: `You extract structured data from OCR text of Walterscheid PDF technical drawings.
+Return ONLY valid JSON with these fields:
+- customer: company name (Kunde / for customer / pour client)
+- customerDrawingNo: customer drawing number (Kundenzeichnungs-Nr / customer drawing No / ref. du plan client)
+- orderNo: order number (Bestell-Nr / Part No / Reference), typically 5-8 digits
+
+Use null for fields you cannot find. No explanation, just JSON.`,
+        },
+        {
+          role: "user",
+          content: truncated,
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) return { customer: null, customerDrawingNo: null, orderNo: null };
+
+  const json = await res.json();
+  const content = json.choices?.[0]?.message?.content?.trim();
+  if (!content) return { customer: null, customerDrawingNo: null, orderNo: null };
+
+  try {
+    // Strip markdown code fences if present
+    const clean = content.replace(/^```json?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+    const parsed = JSON.parse(clean);
+    return {
+      customer: parsed.customer || null,
+      customerDrawingNo: parsed.customerDrawingNo || null,
+      orderNo: parsed.orderNo || null,
+    };
+  } catch {
+    return { customer: null, customerDrawingNo: null, orderNo: null };
+  }
+}
+
 function transliterateGerman(s: string): string {
   return s
     .replace(/ä/g, "ae")
@@ -196,8 +252,26 @@ async function processOnePdf(dbx: Dropbox, file: { path_lower: string; name: str
     const buffer = (dlRes.result as any).fileBinary as Buffer;
     const parsed = await pdfParse(buffer);
     // NFC normalization fixes umlauts stored as base-letter + combining diacritic
-    const fields = extractFieldsFromText(parsed.text.normalize("NFC"));
-    const newName = buildNewName(fields);
+    const normalizedText = parsed.text.normalize("NFC");
+    let fields = extractFieldsFromText(normalizedText);
+    let newName = buildNewName(fields);
+
+    // AI fallback: if regex couldn't resolve all fields, try GPT-4o-mini
+    if (!newName && process.env.OPENAI_API_KEY) {
+      try {
+        const aiFields = await extractFieldsWithAI(normalizedText);
+        // Merge: prefer regex results, fill gaps with AI
+        fields = {
+          customer: fields.customer || aiFields.customer,
+          customerDrawingNo: fields.customerDrawingNo || aiFields.customerDrawingNo,
+          orderNo: fields.orderNo || aiFields.orderNo,
+        };
+        newName = buildNewName(fields);
+      } catch {
+        // AI failed silently, keep regex results
+      }
+    }
+
     return {
       id: file.id,
       originalName: file.name,
