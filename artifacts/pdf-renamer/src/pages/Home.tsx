@@ -199,48 +199,54 @@ export default function Home() {
 
     setAiResolving(true);
     try {
-      const payload = unresolved.map((f) => ({
-        path: f.path,
-        originalName: f.originalName,
-        id: f.id,
-        fields: f.fields,
-      }));
+      const CHUNK = 20;
+      const allResults: PdfFile[] = [];
 
-      const res = await fetch(`${BASE}/api/dropbox/ai-resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: payload }),
-      });
+      for (let i = 0; i < unresolved.length; i += CHUNK) {
+        const chunk = unresolved.slice(i, i + CHUNK);
+        const payload = chunk.map((f) => ({
+          path: f.path,
+          originalName: f.originalName,
+          id: f.id,
+          fields: f.fields,
+        }));
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(err.error || res.statusText);
-      }
-
-      const json: { results: Array<PdfFile> } = await res.json();
-
-      // Update files in state with AI results
-      setFiles((prev) =>
-        prev.map((f) => {
-          const aiResult = json.results.find((r) => r.path === f.path);
-          if (!aiResult) return f;
-          const updated = { ...f, fields: aiResult.fields, newName: aiResult.newName, status: aiResult.status as PdfFile["status"] };
-          return updated;
-        })
-      );
-
-      // Auto-select newly resolved files
-      const resolved = json.results.filter((r) => r.status === "ready");
-      if (resolved.length > 0) {
-        setSelected((prev) => {
-          const next = new Set(prev);
-          for (const r of resolved) next.add(r.path);
-          return next;
+        const res = await fetch(`${BASE}/api/dropbox/ai-resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ files: payload }),
         });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          throw new Error(err.error || res.statusText);
+        }
+
+        const json: { results: Array<PdfFile> } = await res.json();
+        allResults.push(...json.results);
+
+        // Update files progressively after each chunk
+        setFiles((prev) =>
+          prev.map((f) => {
+            const aiResult = json.results.find((r) => r.path === f.path);
+            if (!aiResult) return f;
+            return { ...f, fields: aiResult.fields, newName: aiResult.newName, status: aiResult.status as PdfFile["status"] };
+          })
+        );
+
+        // Auto-select newly resolved
+        const resolved = json.results.filter((r) => r.status === "ready");
+        if (resolved.length > 0) {
+          setSelected((prev) => {
+            const next = new Set(prev);
+            for (const r of resolved) next.add(r.path);
+            return next;
+          });
+        }
       }
 
-      const resolvedCount = resolved.length;
-      const stillUnresolved = json.results.filter((r) => r.status !== "ready").length;
+      const resolvedCount = allResults.filter((r) => r.status === "ready").length;
+      const stillUnresolved = allResults.filter((r) => r.status !== "ready").length;
       toast({
         title: `ИИ распознал: ${resolvedCount} из ${unresolved.length}`,
         description: stillUnresolved > 0 ? `Не удалось: ${stillUnresolved}` : undefined,
