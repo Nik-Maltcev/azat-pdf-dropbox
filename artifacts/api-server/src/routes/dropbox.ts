@@ -62,7 +62,7 @@ interface ScanJob {
   files: ProcessedFile[];
   error?: string;
   startedAt: number;
-  /** Cursor: index of last file the client has fetched */
+  autoAiJobId?: string;
 }
 
 const jobs = new Map<string, ScanJob>();
@@ -297,6 +297,18 @@ async function runScanJob(jobId: string) {
     });
 
     job.status = "done";
+
+    // Auto-launch AI for unresolved files if OPENAI_API_KEY is set
+    if (process.env.OPENAI_API_KEY) {
+      const unresolved = job.files.filter((f) => f.status === "unresolved");
+      if (unresolved.length > 0) {
+        const aiJobId = String(++aiJobCounter);
+        const aiFiles = unresolved.map((f) => ({ path: f.path, originalName: f.originalName, id: f.id, fields: f.fields }));
+        aiJobs.set(aiJobId, { status: "processing", total: aiFiles.length, processed: 0, results: [] });
+        job.autoAiJobId = aiJobId;
+        runAiJob(aiJobId, aiFiles, jobId).catch(() => {});
+      }
+    }
   } catch (err: any) {
     job.status = "error";
     job.error = err.message;
@@ -336,6 +348,7 @@ router.get("/dropbox/scan/status", (req: Request, res: Response) => {
     files: newFiles,
     cursor: cursor + newFiles.length,
     error: job.error,
+    autoAiJobId: job.autoAiJobId,
   });
 });
 

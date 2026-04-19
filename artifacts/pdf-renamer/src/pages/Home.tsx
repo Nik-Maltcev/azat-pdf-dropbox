@@ -112,8 +112,12 @@ export default function Home() {
           setDone(true);
           setScanning(false);
           setStatusMsg(`Готово. Обработано: ${data.processed} из ${data.total} файлов.`);
-          // Keep jobId in localStorage so page reload can restore results!
           if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+
+          // Auto-start AI polling if server launched it
+          if (data.autoAiJobId) {
+            startAiPolling(data.autoAiJobId);
+          }
         } else if (data.status === "error") {
           setScanning(false);
           setStatusMsg(`Ошибка: ${data.error}`);
@@ -219,6 +223,59 @@ export default function Home() {
     });
   }
 
+  function startAiPolling(aiJobId: string) {
+    setAiResolving(true);
+    let aiCursor = 0;
+
+    const aiPoll = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BASE}/api/dropbox/ai-resolve/status?aiJobId=${aiJobId}&cursor=${aiCursor}`);
+        if (!statusRes.ok) return;
+        const data = await statusRes.json();
+
+        if (data.results.length > 0) {
+          aiCursor = data.cursor;
+
+          setFiles((prev) =>
+            prev.map((f) => {
+              const aiResult = data.results.find((r: any) => r.path === f.path);
+              if (!aiResult) return f;
+              return { ...f, fields: aiResult.fields, newName: aiResult.newName, status: aiResult.status as PdfFile["status"] };
+            })
+          );
+
+          const resolved = data.results.filter((r: any) => r.status === "ready");
+          if (resolved.length > 0) {
+            setSelected((prev) => {
+              const next = new Set(prev);
+              for (const r of resolved) next.add(r.path);
+              return next;
+            });
+          }
+        }
+
+        setStatusMsg(`ИИ обработка: ${data.processed} из ${data.total}...`);
+
+        if (data.status === "done" || data.status === "error") {
+          clearInterval(aiPoll);
+          setAiResolving(false);
+
+          if (data.status === "done") {
+            const aiReady = data.results?.filter((r: any) => r.status === "ready").length ?? 0;
+            const aiUnresolved = data.results?.filter((r: any) => r.status === "unresolved").length ?? 0;
+            const aiError = data.results?.filter((r: any) => r.status === "error").length ?? 0;
+            setStatusMsg("");
+            toast({ title: `ИИ: распознано ${aiReady}, не удалось ${aiUnresolved}, ошибок ${aiError}` });
+          } else {
+            toast({ title: "Ошибка ИИ", description: data.error, variant: "destructive" });
+          }
+        }
+      } catch {
+        // Network error — keep polling
+      }
+    }, 2000);
+  }
+
   async function aiResolveUnrecognized() {
     const unresolved = files.filter((f) => f.status === "unresolved");
     if (unresolved.length === 0) {
@@ -226,7 +283,6 @@ export default function Home() {
       return;
     }
 
-    setAiResolving(true);
     try {
       const payload = unresolved.map((f) => ({
         path: f.path,
@@ -249,58 +305,8 @@ export default function Home() {
       }
 
       const { aiJobId } = await res.json();
-      let cursor = 0;
-
-      // Poll AI job
-      const aiPoll = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`${BASE}/api/dropbox/ai-resolve/status?aiJobId=${aiJobId}&cursor=${cursor}`);
-          if (!statusRes.ok) return;
-          const data = await statusRes.json();
-
-          if (data.results.length > 0) {
-            cursor = data.cursor;
-
-            setFiles((prev) =>
-              prev.map((f) => {
-                const aiResult = data.results.find((r: any) => r.path === f.path);
-                if (!aiResult) return f;
-                return { ...f, fields: aiResult.fields, newName: aiResult.newName, status: aiResult.status as PdfFile["status"] };
-              })
-            );
-
-            const resolved = data.results.filter((r: any) => r.status === "ready");
-            if (resolved.length > 0) {
-              setSelected((prev) => {
-                const next = new Set(prev);
-                for (const r of resolved) next.add(r.path);
-                return next;
-              });
-            }
-          }
-
-          setStatusMsg(`ИИ обработка: ${data.processed} из ${data.total}...`);
-
-          if (data.status === "done" || data.status === "error") {
-            clearInterval(aiPoll);
-            setAiResolving(false);
-
-            if (data.status === "done") {
-              const aiReady = data.results?.filter((r: any) => r.status === "ready").length ?? 0;
-              const aiUnresolved = data.results?.filter((r: any) => r.status === "unresolved").length ?? 0;
-              const aiError = data.results?.filter((r: any) => r.status === "error").length ?? 0;
-              setStatusMsg("");
-              toast({ title: `ИИ: распознано ${aiReady}, не удалось ${aiUnresolved}, ошибок ${aiError}` });
-            } else {
-              toast({ title: "Ошибка ИИ", description: data.error, variant: "destructive" });
-            }
-          }
-        } catch {
-          // Network error — keep polling
-        }
-      }, 2000);
+      startAiPolling(aiJobId);
     } catch (e: any) {
-      setAiResolving(false);
       toast({ title: "Ошибка ИИ", description: e.message, variant: "destructive" });
     }
   }
