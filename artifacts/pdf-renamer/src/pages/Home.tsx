@@ -60,6 +60,7 @@ export default function Home() {
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [inspectResult, setInspectResult] = useState<InspectResult | null>(null);
   const [inspectLoading, setInspectLoading] = useState(false);
+  const [aiResolving, setAiResolving] = useState(false);
 
   const esRef = useRef<EventSource | null>(null);
 
@@ -189,6 +190,68 @@ export default function Home() {
     });
   }
 
+  async function aiResolveUnrecognized() {
+    const unresolved = files.filter((f) => f.status === "unresolved");
+    if (unresolved.length === 0) {
+      toast({ title: "Нет нераспознанных файлов" });
+      return;
+    }
+
+    setAiResolving(true);
+    try {
+      const payload = unresolved.map((f) => ({
+        path: f.path,
+        originalName: f.originalName,
+        id: f.id,
+        fields: f.fields,
+      }));
+
+      const res = await fetch(`${BASE}/api/dropbox/ai-resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: payload }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+      }
+
+      const json: { results: Array<PdfFile> } = await res.json();
+
+      // Update files in state with AI results
+      setFiles((prev) =>
+        prev.map((f) => {
+          const aiResult = json.results.find((r) => r.path === f.path);
+          if (!aiResult) return f;
+          const updated = { ...f, fields: aiResult.fields, newName: aiResult.newName, status: aiResult.status as PdfFile["status"] };
+          return updated;
+        })
+      );
+
+      // Auto-select newly resolved files
+      const resolved = json.results.filter((r) => r.status === "ready");
+      if (resolved.length > 0) {
+        setSelected((prev) => {
+          const next = new Set(prev);
+          for (const r of resolved) next.add(r.path);
+          return next;
+        });
+      }
+
+      const resolvedCount = resolved.length;
+      const stillUnresolved = json.results.filter((r) => r.status !== "ready").length;
+      toast({
+        title: `ИИ распознал: ${resolvedCount} из ${unresolved.length}`,
+        description: stillUnresolved > 0 ? `Не удалось: ${stillUnresolved}` : undefined,
+      });
+    } catch (e: any) {
+      toast({ title: "Ошибка ИИ", description: e.message, variant: "destructive" });
+    } finally {
+      setAiResolving(false);
+    }
+  }
+
   const filteredFiles = files.filter((f) => {
     if (filter === "all") return true;
     return f.status === filter;
@@ -286,6 +349,31 @@ export default function Home() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                     </svg>
                     Переименовать ({selected.size})
+                  </>
+                )}
+              </button>
+            )}
+
+            {unresolvedCount > 0 && !scanning && (
+              <button
+                onClick={aiResolveUnrecognized}
+                disabled={aiResolving}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600 transition disabled:opacity-50"
+              >
+                {aiResolving ? (
+                  <>
+                    <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                    </svg>
+                    ИИ обработка...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                    ИИ ({unresolvedCount})
                   </>
                 )}
               </button>

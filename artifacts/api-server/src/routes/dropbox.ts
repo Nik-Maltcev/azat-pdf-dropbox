@@ -251,26 +251,9 @@ async function processOnePdf(dbx: Dropbox, file: { path_lower: string; name: str
     const dlRes = await dbx.filesDownload({ path: file.path_lower });
     const buffer = (dlRes.result as any).fileBinary as Buffer;
     const parsed = await pdfParse(buffer);
-    // NFC normalization fixes umlauts stored as base-letter + combining diacritic
     const normalizedText = parsed.text.normalize("NFC");
-    let fields = extractFieldsFromText(normalizedText);
-    let newName = buildNewName(fields);
-
-    // AI fallback: if regex couldn't resolve all fields, try GPT-4o-mini
-    if (!newName && process.env.OPENAI_API_KEY) {
-      try {
-        const aiFields = await extractFieldsWithAI(normalizedText);
-        // Merge: prefer regex results, fill gaps with AI
-        fields = {
-          customer: fields.customer || aiFields.customer,
-          customerDrawingNo: fields.customerDrawingNo || aiFields.customerDrawingNo,
-          orderNo: fields.orderNo || aiFields.orderNo,
-        };
-        newName = buildNewName(fields);
-      } catch {
-        // AI failed silently, keep regex results
-      }
-    }
+    const fields = extractFieldsFromText(normalizedText);
+    const newName = buildNewName(fields);
 
     return {
       id: file.id,
@@ -469,6 +452,71 @@ router.get("/dropbox/inspect", async (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// POST /api/dropbox/ai-resolve — use GPT-4o-mini to resolve unrecognized PDFs
+router.post("/dropbox/ai-resolve", async (req: Request, res: Response) => {
+  const { files } = req.body as {
+    files: Array<{ path: string; originalName: string; id: string; fields: PdfFields }>;
+  };
+
+  if (!Array.isArray(files) || files.length === 0) {
+    res.status(400).json({ error: "files array is required" });
+    return;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    res.status(400).json({ error: "OPENAI_API_KEY is not configured" });
+    return;
+  }
+
+  const dbx = getDropboxClient();
+
+  const tasks = files.map((f) => async () => {
+    try {
+      const dlRes = await dbx.filesDownload({ path: f.path });
+      const buffer = (dlRes.result as any).fileBinary as Buffer;
+      const parsed = await pdfParse(buffer);
+      const normalizedText = parsed.text.normalize("NFC");
+
+      const aiFields = await extractFieldsWithAI(normalizedText);
+
+      // Merge: prefer existing regex results, fill gaps with AI
+      const merged: PdfFields = {
+        customer: f.fields.customer || aiFields.customer,
+        customerDrawingNo: f.fields.customerDrawingNo || aiFields.customerDrawingNo,
+        orderNo: f.fields.orderNo || aiFields.orderNo,
+      };
+
+      const newName = buildNewName(merged);
+
+      return {
+        id: f.id,
+        originalName: f.originalName,
+        path: f.path,
+        fields: merged,
+        newName,
+        status: newName ? "ready" : "unresolved",
+      };
+    } catch (err: any) {
+      return {
+        id: f.id,
+        originalName: f.originalName,
+        path: f.path,
+        fields: f.fields,
+        newName: null,
+        status: "error",
+        error: err.message,
+      };
+    }
+  });
+
+  const results: any[] = [];
+  await runWithConcurrency(tasks, 5, (result) => {
+    results.push(result);
+  });
+
+  res.json({ results });
 });
 
 export default router;
