@@ -378,14 +378,26 @@ router.get("/dropbox/scan", async (req: Request, res: Response) => {
       return;
     }
 
-    // 2. Process files with concurrency
+    // 2. Process files with concurrency, send results in batches to avoid browser SSE overload
+    const SSE_BATCH_SIZE = 50;
     let processed = 0;
+    let batch: any[] = [];
     const tasks = allPdfs.map((file) => () => processOnePdf(dbx, file));
 
     await runWithConcurrency(tasks, BATCH_CONCURRENCY, (result) => {
       processed++;
-      send("file", { ...result, processed, total: allPdfs.length });
+      batch.push({ ...result, processed, total: allPdfs.length });
+
+      if (batch.length >= SSE_BATCH_SIZE) {
+        send("batch", { files: batch, processed, total: allPdfs.length });
+        batch = [];
+      }
     });
+
+    // Flush remaining
+    if (batch.length > 0) {
+      send("batch", { files: batch, processed, total: allPdfs.length });
+    }
 
     send("done", { total: allPdfs.length, processed });
     res.end();

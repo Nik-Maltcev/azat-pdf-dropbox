@@ -111,6 +111,20 @@ export default function Home() {
       }
     });
 
+    es.addEventListener("batch", (e) => {
+      const d: { files: PdfFile[]; processed: number; total: number } = JSON.parse(e.data);
+      setProcessed(d.processed);
+      setFiles((prev) => [...prev, ...d.files]);
+      const readyPaths = d.files.filter((f) => f.status === "ready").map((f) => f.path);
+      if (readyPaths.length > 0) {
+        setSelected((prev) => {
+          const next = new Set(prev);
+          for (const p of readyPaths) next.add(p);
+          return next;
+        });
+      }
+    });
+
     es.addEventListener("done", (e) => {
       const d = JSON.parse(e.data);
       setDone(true);
