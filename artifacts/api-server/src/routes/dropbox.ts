@@ -31,11 +31,13 @@ function extractFieldsFromText(text: string): PdfFields {
 
   // Match label lines (allow extra spaces inside words due to PDF extraction artefacts)
   const CUST_LABEL    = /\bkunde\b|f\s*o\s*r\s+cus\s*t\s*o\s*m\s*e\s*r|pour\s+c[l\s]+i\s*ent/i;
-  const CD_LABEL      = /kunden\s*[-–]?\s*zeichnungs\s*[-–]?\s*nr|customer\s+drawing\s+no|ref\s*\.?\s*du\s+plan\s+client/i;
+  const CD_LABEL      = /kunden\s*[-–]?\s*zeichnungs\s*[-–]?\s*nr|customer\s*[-–]?\s*drawing\s+no|ref\s*\.?\s*du\s+plan\s+client|~~to~er\s+drawing/i;
   const ORDER_LABEL   = /bestell\s*[-–]?\s*nr|part\s+no/i;
+  // Also match plain "Zeichnungs-Nr" (without "Kunden") as a fallback for customer drawing
+  const PLAIN_DRAWING_LABEL = /^zeichnungs\s*[-–.]?\s*nr/i;
 
   // Lines that look like labels/headers (skip them as value candidates)
-  const IS_LABEL      = /\bkunde\b|f\s*o\s*r\s+cus|pour\s+c[l\s]|^pour\b|^c\s*l\s*i\s*ent\b|^i\s*ent\b|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|^machine\b|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref\.\s+du|technisch|technicol|angaben|quant|pos\.-nr|gelenkwelle|kupplung|^clutch\b|^limiteur\b|^pto\b|transm|^seite\b|^page\b|benennung/i;
+  const IS_LABEL      = /\bkunde\b|f\s*o\s*r\s+cus|pour\s+c[l\s]|^pour\b|^c\s*l\s*i\s*ent\b|^i\s*ent\b|kunden|customer\s*draw|zeichnungs|bestell|part\s*no|drawing\s+no|datum|date\b|^machine\b|t[~y]pe|maschinenart|stückzahl|quantity|^pos\b|^repere|^reference\b|ref[\.\s]+du|technisch|technicol|angaben|quant|pos\.-nr|gelenkwelle|kupplung|^clutch\b|^limiteur\b|^pto\b|transm|^seite\b|^page\b|benennung|^oraw|^ref\s*~|~~to~er|plan\s+cl/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -58,18 +60,22 @@ function extractFieldsFromText(text: string): PdfFields {
     }
 
     // ── Customer drawing no ───────────────────────────────────────────────────
-    if (!customerDrawingNo && CD_LABEL.test(line)) {
-      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+    if (!customerDrawingNo && (CD_LABEL.test(line) || PLAIN_DRAWING_LABEL.test(line))) {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
         const raw = lines[j].split(/\s{3,}/)[0].trim();
         // Strip internal spaces (e.g. "801 2479" → "8012479")
         const candidate = raw.replace(/\s+/g, "");
+        // Skip pure garbage lines (only symbols, very short, or label-like)
+        if (candidate.length < 2) continue;
+        if (/^[~@©()\[\]{}|\\\/\-_.,:;!?#$%^&*+=<>]+$/.test(candidate)) continue;
+        if (IS_LABEL.test(raw)) continue;
         if (
           candidate.length >= 3 &&
           /^[\dA-Za-zÄÖÜäöüß]/.test(candidate) && // must start with alphanumeric
-          !IS_LABEL.test(raw) &&
           /[\dA-Za-z]{2}/.test(candidate)          // must contain at least 2 alnum chars
         ) {
-          customerDrawingNo = candidate;
+          // Normalize dots/commas to dashes for drawing numbers like "58,13" or "56.136.51"
+          customerDrawingNo = candidate.replace(/[.,]/g, "-");
           break;
         }
       }
@@ -119,6 +125,12 @@ function extractFieldsFromText(text: string): PdfFields {
     if (m) customerDrawingNo = m[1].replace(/\s+/g, "");
   }
 
+  // Customer drawing no: look for dotted/comma number patterns like "56.136.51" or "58,13"
+  if (!customerDrawingNo) {
+    const m = text.match(/\b(\d{1,5}[.,]\d{1,5}(?:[.,]\d{1,5})?)\b/);
+    if (m) customerDrawingNo = m[1].replace(/[.,]/g, "-");
+  }
+
   // Order no: first standalone 6-8 digit number
   if (!orderNo) {
     const m = text.match(/\b(\d{6,8})\b/);
@@ -130,7 +142,30 @@ function extractFieldsFromText(text: string): PdfFields {
     const m = text.match(
       /(?:für\s+Kunde|for\s+cus\s*tomer|pour\s+cl[i\s]+ent)[^\n]*\n\s*([A-ZÄÖÜa-zäöüß][A-Za-zÄÖÜäöüß\s&.()\-]{2,35})/i
     );
-    if (m) customer = m[1].trim();
+    if (m) {
+      const val = m[1].trim();
+      if (!IS_LABEL.test(val)) customer = val;
+    }
+  }
+
+  // Customer: look further — scan all lines after any customer label for a company-like name
+  if (!customer) {
+    const custIdx = lines.findIndex((l) => CUST_LABEL.test(l));
+    if (custIdx >= 0) {
+      for (let j = custIdx + 1; j < Math.min(custIdx + 8, lines.length); j++) {
+        const candidate = lines[j].split(/\s{3,}/)[0].trim();
+        if (
+          candidate.length >= 3 &&
+          /^[A-ZÄÖÜa-zäöüß]/.test(candidate) &&
+          /[A-Za-zÄÖÜäöüß]{3}/.test(candidate) &&
+          !IS_LABEL.test(candidate) &&
+          !/^[~@©()\[\]{}|\\\/\-_.,:;!?#$%^&*+=<>\d]+$/.test(candidate)
+        ) {
+          customer = candidate;
+          break;
+        }
+      }
+    }
   }
 
   return { customer, customerDrawingNo, orderNo };
