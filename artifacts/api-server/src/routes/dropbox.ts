@@ -7,7 +7,7 @@ const pdfParse: (buffer: Buffer) => Promise<{ text: string }> = (globalThis as a
 const router = Router();
 
 const DROPBOX_FOLDER = "/Walterscheid";
-const BATCH_CONCURRENCY = 10;
+const BATCH_CONCURRENCY = 5;
 
 function getDropboxClient(): Dropbox {
   const token = process.env.DROPBOX_ACCESS_TOKEN;
@@ -19,7 +19,7 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function downloadWithRetry(dbx: Dropbox, path: string, maxRetries = 3): Promise<Buffer> {
+async function downloadWithRetry(dbx: Dropbox, path: string, maxRetries = 5): Promise<Buffer> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const dlRes = await dbx.filesDownload({ path });
@@ -28,7 +28,7 @@ async function downloadWithRetry(dbx: Dropbox, path: string, maxRetries = 3): Pr
       const status = err?.status || err?.error?.status;
       if (status === 429 && attempt < maxRetries) {
         const retryAfter = err?.headers?.["retry-after"];
-        const waitMs = retryAfter ? Number(retryAfter) * 1000 : (2 ** attempt) * 2000;
+        const waitMs = retryAfter ? Number(retryAfter) * 1000 : (2 ** attempt) * 3000;
         await sleep(waitMs);
         continue;
       }
