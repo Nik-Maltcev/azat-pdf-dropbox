@@ -8,12 +8,36 @@ const pdfParse: (buffer: Buffer) => Promise<{ text: string }> = (globalThis as a
 const router = Router();
 
 const DROPBOX_FOLDER = "/Walterscheid";
-const BATCH_CONCURRENCY = 15; // concurrent downloads
+const BATCH_CONCURRENCY = 5; // concurrent downloads (conservative to avoid 429)
 
 function getDropboxClient(): Dropbox {
   const token = process.env.DROPBOX_ACCESS_TOKEN;
   if (!token) throw new Error("DROPBOX_ACCESS_TOKEN is not set");
   return new Dropbox({ accessToken: token });
+}
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadWithRetry(dbx: Dropbox, path: string, maxRetries = 3): Promise<Buffer> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const dlRes = await dbx.filesDownload({ path });
+      return (dlRes.result as any).fileBinary as Buffer;
+    } catch (err: any) {
+      const status = err?.status || err?.error?.status;
+      if (status === 429 && attempt < maxRetries) {
+        // Dropbox rate limit — wait with exponential backoff
+        const retryAfter = err?.headers?.["retry-after"];
+        const waitMs = retryAfter ? Number(retryAfter) * 1000 : (2 ** attempt) * 2000;
+        await sleep(waitMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Max retries exceeded for Dropbox download");
 }
 
 interface PdfFields {
@@ -248,8 +272,7 @@ function buildNewName(fields: PdfFields): string | null {
 
 async function processOnePdf(dbx: Dropbox, file: { path_lower: string; name: string; id: string }) {
   try {
-    const dlRes = await dbx.filesDownload({ path: file.path_lower });
-    const buffer = (dlRes.result as any).fileBinary as Buffer;
+    const buffer = await downloadWithRetry(dbx, file.path_lower);
     const parsed = await pdfParse(buffer);
     const normalizedText = parsed.text.normalize("NFC");
     const fields = extractFieldsFromText(normalizedText);
@@ -424,8 +447,7 @@ router.get("/dropbox/inspect", async (req: Request, res: Response) => {
   }
   try {
     const dbx = getDropboxClient();
-    const dlRes = await dbx.filesDownload({ path: filePath });
-    const buffer = (dlRes.result as any).fileBinary as Buffer;
+    const buffer = await downloadWithRetry(dbx, filePath);
     const parsed = await pdfParse(buffer);
 
     // Show both raw and NFC-normalized text
@@ -474,8 +496,7 @@ router.post("/dropbox/ai-resolve", async (req: Request, res: Response) => {
 
   const tasks = files.map((f) => async () => {
     try {
-      const dlRes = await dbx.filesDownload({ path: f.path });
-      const buffer = (dlRes.result as any).fileBinary as Buffer;
+      const buffer = await downloadWithRetry(dbx, f.path);
       const parsed = await pdfParse(buffer);
       const normalizedText = parsed.text.normalize("NFC");
 
@@ -512,7 +533,7 @@ router.post("/dropbox/ai-resolve", async (req: Request, res: Response) => {
   });
 
   const results: any[] = [];
-  await runWithConcurrency(tasks, 5, (result) => {
+  await runWithConcurrency(tasks, 3, (result) => {
     results.push(result);
   });
 
