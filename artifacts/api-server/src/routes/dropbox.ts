@@ -409,14 +409,23 @@ router.get("/dropbox/inspect", async (req: Request, res: Response) => {
   }
 });
 
-// ── AI resolve ──────────────────────────────────────────────────────────────
+// ── AI resolve (background job) ─────────────────────────────────────────────
 
-router.post("/dropbox/ai-resolve", async (req: Request, res: Response) => {
-  const { files } = req.body as { files: Array<{ path: string; originalName: string; id: string; fields: PdfFields }> };
-  if (!Array.isArray(files) || files.length === 0) { res.status(400).json({ error: "files array is required" }); return; }
-  if (!process.env.OPENAI_API_KEY) { res.status(400).json({ error: "OPENAI_API_KEY is not configured" }); return; }
+interface AiJob {
+  status: "processing" | "done" | "error";
+  total: number;
+  processed: number;
+  results: ProcessedFile[];
+  error?: string;
+}
 
+const aiJobs = new Map<string, AiJob>();
+let aiJobCounter = 0;
+
+async function runAiJob(aiJobId: string, files: Array<{ path: string; originalName: string; id: string; fields: PdfFields }>, scanJobId?: string) {
+  const aiJob = aiJobs.get(aiJobId)!;
   const dbx = getDropboxClient();
+
   const tasks = files.map((f) => async () => {
     try {
       const buffer = await downloadWithRetry(dbx, f.path);
@@ -429,15 +438,57 @@ router.post("/dropbox/ai-resolve", async (req: Request, res: Response) => {
         orderNo: f.fields.orderNo || aiFields.orderNo,
       };
       const newName = buildNewName(merged);
-      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged, newName, status: newName ? "ready" : "unresolved" };
+      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged, newName, status: newName ? "ready" : "unresolved" } as ProcessedFile;
     } catch (err: any) {
-      return { id: f.id, originalName: f.originalName, path: f.path, fields: f.fields, newName: null, status: "error", error: err.message };
+      return { id: f.id, originalName: f.originalName, path: f.path, fields: f.fields, newName: null, status: "error", error: err.message } as ProcessedFile;
     }
   });
 
-  const results: any[] = [];
-  await runWithConcurrency(tasks, 3, (result) => { results.push(result); });
-  res.json({ results });
+  try {
+    await runWithConcurrency(tasks, 3, (result) => {
+      aiJob.processed++;
+      aiJob.results.push(result);
+
+      // Also update the scan job if it exists
+      if (scanJobId && jobs.has(scanJobId)) {
+        const scanJob = jobs.get(scanJobId)!;
+        const idx = scanJob.files.findIndex((f) => f.path === result.path);
+        if (idx >= 0) scanJob.files[idx] = result;
+      }
+    });
+    aiJob.status = "done";
+  } catch (err: any) {
+    aiJob.status = "error";
+    aiJob.error = err.message;
+  }
+}
+
+router.post("/dropbox/ai-resolve/start", (req: Request, res: Response) => {
+  const { files, scanJobId } = req.body as { files: Array<{ path: string; originalName: string; id: string; fields: PdfFields }>; scanJobId?: string };
+  if (!Array.isArray(files) || files.length === 0) { res.status(400).json({ error: "files array is required" }); return; }
+  if (!process.env.OPENAI_API_KEY) { res.status(400).json({ error: "OPENAI_API_KEY is not configured" }); return; }
+
+  const aiJobId = String(++aiJobCounter);
+  aiJobs.set(aiJobId, { status: "processing", total: files.length, processed: 0, results: [] });
+  runAiJob(aiJobId, files, scanJobId).catch(() => {});
+  res.json({ aiJobId });
+});
+
+router.get("/dropbox/ai-resolve/status", (req: Request, res: Response) => {
+  const aiJobId = req.query.aiJobId as string;
+  const cursor = Number(req.query.cursor || 0);
+  if (!aiJobId || !aiJobs.has(aiJobId)) { res.status(404).json({ error: "AI job not found" }); return; }
+
+  const aiJob = aiJobs.get(aiJobId)!;
+  const newResults = aiJob.results.slice(cursor);
+  res.json({
+    status: aiJob.status,
+    total: aiJob.total,
+    processed: aiJob.processed,
+    results: newResults,
+    cursor: cursor + newResults.length,
+    error: aiJob.error,
+  });
 });
 
 export default router;
