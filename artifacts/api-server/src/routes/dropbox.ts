@@ -510,4 +510,30 @@ router.get("/dropbox/ai-resolve/status", (req: Request, res: Response) => {
   });
 });
 
+// ── CSV export ───────────────────────────────────────────────────────────────
+
+router.get("/dropbox/export-csv", (req: Request, res: Response) => {
+  const jobId = req.query.jobId as string;
+  if (!jobId || !jobs.has(jobId)) { res.status(404).json({ error: "Job not found" }); return; }
+
+  const job = jobs.get(jobId)!;
+  const readyFiles = job.files.filter((f) => f.status === "ready" && f.fields.customer && f.fields.customerDrawingNo && f.fields.orderNo);
+
+  // BOM for Excel UTF-8 detection
+  const BOM = "\uFEFF";
+  const header = "№;OEM;Original PN;PN WPG";
+  const rows = readyFiles.map((f, i) => {
+    const oem = (f.fields.customer || "").replace(/;/g, ",");
+    const originalPn = (f.fields.customerDrawingNo || "").replace(/;/g, ",");
+    const pnWpg = (f.fields.orderNo || "").replace(/;/g, ",");
+    return `${i + 1};${oem};${originalPn};${pnWpg}`;
+  });
+
+  const csv = BOM + header + "\n" + rows.join("\n");
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=walterscheid_catalog.csv");
+  res.send(csv);
+});
+
 export default router;
