@@ -189,39 +189,60 @@ export default function Home() {
     }
 
     setRenaming(true);
+    setStatusMsg(`Переименование: 0 из ${toRename.length}...`);
+
     try {
-      const CHUNK = 500;
-      const allResults: RenameResult[] = [];
-      for (let i = 0; i < toRename.length; i += CHUNK) {
-        const chunk = toRename.slice(i, i + CHUNK);
-        const res = await fetch(`${BASE}/api/dropbox/rename`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ files: chunk }),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ error: res.statusText }));
-          throw new Error(err.error || res.statusText);
-        }
-        const json: { results: RenameResult[] } = await res.json();
-        allResults.push(...json.results);
-      }
-
-      const resultMap: Record<string, RenameResult> = {};
-      for (const r of allResults) resultMap[r.path] = r;
-      setRenameResults((prev) => ({ ...prev, ...resultMap }));
-
-      const renamed = allResults.filter((r) => r.status === "renamed").length;
-      const errors = allResults.filter((r) => r.status === "error").length;
-      toast({
-        title: renamed > 0 ? `Переименовано: ${renamed} файл(ов)` : "Готово",
-        description: errors > 0 ? `Ошибок: ${errors}` : undefined,
-        variant: errors > 0 ? "destructive" : "default",
+      const res = await fetch(`${BASE}/api/dropbox/rename/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: toRename }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+      }
+      const { renameJobId } = await res.json();
+      let cursor = 0;
+
+      const renamePoll = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${BASE}/api/dropbox/rename/status?renameJobId=${renameJobId}&cursor=${cursor}`);
+          if (!statusRes.ok) return;
+          const data = await statusRes.json();
+
+          setProcessed(data.processed);
+          setTotal(data.total);
+          setStatusMsg(`Переименование: ${data.processed} из ${data.total}...`);
+
+          if (data.results.length > 0) {
+            cursor = data.cursor;
+            const resultMap: Record<string, RenameResult> = {};
+            for (const r of data.results) resultMap[r.path] = r;
+            setRenameResults((prev) => ({ ...prev, ...resultMap }));
+          }
+
+          if (data.status === "done" || data.status === "error") {
+            clearInterval(renamePoll);
+            setRenaming(false);
+
+            const allResults = data.results;
+            const renamed = Object.values({ ...renameResults, ...Object.fromEntries(data.results.map((r: any) => [r.path, r])) }).filter((r: any) => r.status === "renamed").length;
+            setStatusMsg(`Переименование завершено: ${renamed} файл(ов)`);
+
+            if (data.status === "error") {
+              toast({ title: "Ошибка переименования", description: data.error, variant: "destructive" });
+            } else {
+              toast({ title: `Переименовано: ${data.processed} файл(ов)` });
+            }
+          }
+        } catch {
+          // keep polling
+        }
+      }, 2000);
     } catch (e: any) {
-      toast({ title: "Ошибка переименования", description: e.message, variant: "destructive" });
-    } finally {
       setRenaming(false);
+      setStatusMsg("");
+      toast({ title: "Ошибка переименования", description: e.message, variant: "destructive" });
     }
   }
 
@@ -484,7 +505,7 @@ export default function Home() {
 
       <main className="max-w-6xl mx-auto px-6 py-5 space-y-4">
         {/* Progress bar */}
-        {(scanning || (files.length > 0 && !done)) && (
+        {(scanning || renaming || (files.length > 0 && !done && !renaming)) && (
           <div className="bg-card border border-card-border rounded-xl p-4 shadow-sm space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-foreground font-medium">{statusMsg}</span>

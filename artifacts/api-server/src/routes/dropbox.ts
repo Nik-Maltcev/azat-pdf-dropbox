@@ -450,10 +450,28 @@ router.delete("/dropbox/scan/job", (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-router.post("/dropbox/rename", async (req: Request, res: Response) => {
-  const { files } = req.body as { files: Array<{ path: string; newName: string }> };
-  if (!Array.isArray(files) || files.length === 0) { res.status(400).json({ error: "files array is required" }); return; }
-  const mu = new Array(files.length).fill(null);
+// ── Rename (background job) ──────────────────────────────────────────────────
+
+interface RenameJob {
+  status: "processing" | "done" | "error";
+  total: number;
+  processed: number;
+  results: Array<{ path: string; newName?: string; newPath?: string; status: string; error?: string; reason?: string }>;
+  error?: string;
+  startedAt: number;
+}
+
+const renameJobs = new Map<string, RenameJob>();
+let renameJobCounter = 0;
+
+// Clean up rename jobs too
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [id, job] of renameJobs) { if (job.startedAt < cutoff) renameJobs.delete(id); }
+}, 10 * 60 * 1000);
+
+async function runRenameJob(renameJobId: string, files: Array<{ path: string; newName: string }>) {
+  const job = renameJobs.get(renameJobId)!;
   const tasks = files.map((f) => async () => {
     try {
       const dir = f.path.substring(0, f.path.lastIndexOf("/"));
@@ -465,8 +483,38 @@ router.post("/dropbox/rename", async (req: Request, res: Response) => {
       return { path: f.path, newName: f.newName, status: "error", error: err.message };
     }
   });
-  await runWithConcurrency(tasks, 5, (result, i) => { mu[i] = result; });
-  res.json({ results: mu.filter(Boolean) });
+
+  try {
+    await runWithConcurrency(tasks, 5, (result) => {
+      job.processed++;
+      job.results.push(result);
+    });
+    job.status = "done";
+  } catch (err: any) {
+    job.status = "error";
+    job.error = err.message;
+  }
+}
+
+router.post("/dropbox/rename/start", (req: Request, res: Response) => {
+  const { files } = req.body as { files: Array<{ path: string; newName: string }> };
+  if (!Array.isArray(files) || files.length === 0) { res.status(400).json({ error: "files array is required" }); return; }
+  const renameJobId = String(++renameJobCounter);
+  renameJobs.set(renameJobId, { status: "processing", total: files.length, processed: 0, results: [], startedAt: Date.now() });
+  runRenameJob(renameJobId, files).catch(() => {});
+  res.json({ renameJobId });
+});
+
+router.get("/dropbox/rename/status", (req: Request, res: Response) => {
+  const renameJobId = req.query.renameJobId as string;
+  const cursor = Number(req.query.cursor || 0);
+  if (!renameJobId || !renameJobs.has(renameJobId)) { res.status(404).json({ error: "Rename job not found" }); return; }
+  const job = renameJobs.get(renameJobId)!;
+  const newResults = job.results.slice(cursor);
+  res.json({
+    status: job.status, total: job.total, processed: job.processed,
+    results: newResults, cursor: cursor + newResults.length, error: job.error,
+  });
 });
 
 router.get("/dropbox/inspect", async (req: Request, res: Response) => {
