@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 
 interface PdfFields {
@@ -15,8 +15,6 @@ interface PdfFile {
   newName: string | null;
   status: "ready" | "unresolved" | "error";
   error?: string;
-  processed: number;
-  total: number;
 }
 
 type RenameStatus = "idle" | "renamed" | "error" | "skipped";
@@ -63,15 +61,17 @@ export default function Home() {
   const [aiResolving, setAiResolving] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const aiPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const jobIdRef = useRef<string | null>(null);
 
   const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-  // Poll a job for results — used both by startScan and resume on page load
+  // Fix #1: pollJob replaces files (not appends) when cursor=0, appends for cursor>0
   const pollJob = useCallback((jobId: string, initialCursor = 0) => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     jobIdRef.current = jobId;
     let cursor = initialCursor;
+    let isFirstPoll = initialCursor === 0;
 
     pollRef.current = setInterval(async () => {
       try {
@@ -93,7 +93,14 @@ export default function Home() {
 
         if (data.files.length > 0) {
           cursor = data.cursor;
-          setFiles((prev) => [...prev, ...data.files]);
+          // Fix #1: on first poll (restore), replace files; on subsequent polls, append
+          if (isFirstPoll) {
+            setFiles(data.files);
+            isFirstPoll = false;
+          } else {
+            setFiles((prev) => [...prev, ...data.files]);
+          }
+          // Fix #2: build selected from ALL ready files, not incremental
           const readyPaths = data.files.filter((f: any) => f.status === "ready").map((f: any) => f.path);
           if (readyPaths.length > 0) {
             setSelected((prev) => {
@@ -130,15 +137,19 @@ export default function Home() {
     }, 2000);
   }, [BASE, toast]);
 
-  // Resume from last job on page load
-  useState(() => {
+  // Fix #9: proper useEffect for resume on page load (not useState hack)
+  useEffect(() => {
     const savedJobId = localStorage.getItem("scanJobId");
     if (savedJobId) {
       setScanning(true);
       setStatusMsg("Восстановление данных...");
       pollJob(savedJobId, 0);
     }
-  });
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (aiPollRef.current) clearInterval(aiPollRef.current);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startScan = useCallback(async () => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -224,17 +235,35 @@ export default function Home() {
   }
 
   function startAiPolling(aiJobId: string) {
+    if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
     setAiResolving(true);
     let aiCursor = 0;
+    // Fix #5: track totals across all poll batches
+    let totalReady = 0;
+    let totalUnresolved = 0;
+    let totalError = 0;
 
-    const aiPoll = setInterval(async () => {
+    aiPollRef.current = setInterval(async () => {
       try {
         const statusRes = await fetch(`${BASE}/api/dropbox/ai-resolve/status?aiJobId=${aiJobId}&cursor=${aiCursor}`);
-        if (!statusRes.ok) return;
+        if (!statusRes.ok) {
+          if (statusRes.status === 404) {
+            if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
+            setAiResolving(false);
+          }
+          return;
+        }
         const data = await statusRes.json();
 
         if (data.results.length > 0) {
           aiCursor = data.cursor;
+
+          // Count across all batches
+          for (const r of data.results) {
+            if (r.status === "ready") totalReady++;
+            else if (r.status === "unresolved") totalUnresolved++;
+            else totalError++;
+          }
 
           setFiles((prev) =>
             prev.map((f) => {
@@ -257,15 +286,12 @@ export default function Home() {
         setStatusMsg(`ИИ обработка: ${data.processed} из ${data.total}...`);
 
         if (data.status === "done" || data.status === "error") {
-          clearInterval(aiPoll);
+          if (aiPollRef.current) { clearInterval(aiPollRef.current); aiPollRef.current = null; }
           setAiResolving(false);
 
           if (data.status === "done") {
-            const aiReady = data.results?.filter((r: any) => r.status === "ready").length ?? 0;
-            const aiUnresolved = data.results?.filter((r: any) => r.status === "unresolved").length ?? 0;
-            const aiError = data.results?.filter((r: any) => r.status === "error").length ?? 0;
             setStatusMsg("");
-            toast({ title: `ИИ: распознано ${aiReady}, не удалось ${aiUnresolved}, ошибок ${aiError}` });
+            toast({ title: `ИИ: распознано ${totalReady}, не удалось ${totalUnresolved}, ошибок ${totalError}` });
           } else {
             toast({ title: "Ошибка ИИ", description: data.error, variant: "destructive" });
           }
