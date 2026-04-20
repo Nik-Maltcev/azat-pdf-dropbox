@@ -260,7 +260,7 @@ async function extractFieldsWithAI(text: string): Promise<PdfFields> {
   } catch { return { customer: null, customerDrawingNo: null, orderNo: null }; }
 }
 
-async function extractFieldsWithVision(pdfBuffer: Buffer): Promise<PdfFields> {
+async function extractFieldsWithVision(pdfBuffer: Buffer, model = "gpt-4o-mini"): Promise<PdfFields> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { customer: null, customerDrawingNo: null, orderNo: null };
 
@@ -292,7 +292,7 @@ async function extractFieldsWithVision(pdfBuffer: Buffer): Promise<PdfFields> {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: "gpt-4o", temperature: 0, max_tokens: 200,
+        model: model, temperature: 0, max_tokens: 200,
         messages: [
           { role: "system", content: `Extract from this Walterscheid technical drawing:\n- customer: company name (für Kunde / for customer / pour client)\n- customerDrawingNo: customer drawing number (Kundenzeichnungs-Nr)\n- orderNo: order number (Bestell-Nr / Part No), typically 5-8 digits\n\nReturn ONLY valid JSON. Use null for missing fields.` },
           { role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${base64}`, detail: "low" } }] },
@@ -540,15 +540,27 @@ async function runAiJob(aiJobId: string, files: Array<{ path: string; originalNa
         return { id: f.id, originalName: f.originalName, path: f.path, fields: merged1, newName: name1, status: "ready" } as ProcessedFile;
       }
 
-      // Step 2: GPT-4o vision (image-based, more expensive but accurate)
-      const visionFields = await extractFieldsWithVision(buffer);
+      // Step 2: GPT-4o-mini vision (image-based, still cheap)
+      const visionFieldsMini = await extractFieldsWithVision(buffer, "gpt-4o-mini");
       const merged2: PdfFields = {
-        customer: merged1.customer || visionFields.customer,
-        customerDrawingNo: merged1.customerDrawingNo || visionFields.customerDrawingNo,
-        orderNo: merged1.orderNo || visionFields.orderNo,
+        customer: merged1.customer || visionFieldsMini.customer,
+        customerDrawingNo: merged1.customerDrawingNo || visionFieldsMini.customerDrawingNo,
+        orderNo: merged1.orderNo || visionFieldsMini.orderNo,
       };
       const name2 = buildNewName(merged2);
-      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged2, newName: name2, status: name2 ? "ready" : "unresolved" } as ProcessedFile;
+      if (name2) {
+        return { id: f.id, originalName: f.originalName, path: f.path, fields: merged2, newName: name2, status: "ready" } as ProcessedFile;
+      }
+
+      // Step 3: GPT-4o vision (more expensive but most accurate)
+      const visionFields4o = await extractFieldsWithVision(buffer, "gpt-4o");
+      const merged3: PdfFields = {
+        customer: merged2.customer || visionFields4o.customer,
+        customerDrawingNo: merged2.customerDrawingNo || visionFields4o.customerDrawingNo,
+        orderNo: merged2.orderNo || visionFields4o.orderNo,
+      };
+      const name3 = buildNewName(merged3);
+      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged3, newName: name3, status: name3 ? "ready" : "unresolved" } as ProcessedFile;
     } catch (err: any) {
       return { id: f.id, originalName: f.originalName, path: f.path, fields: f.fields, newName: null, status: "error", error: err.message } as ProcessedFile;
     }
