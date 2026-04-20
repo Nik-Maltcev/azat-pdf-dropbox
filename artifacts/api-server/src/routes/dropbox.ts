@@ -445,6 +445,7 @@ interface ScanJob {
   error?: string;
   startedAt: number;
   autoAiJobId?: string;
+  autoRenameJobId?: string;
 }
 
 interface AiJob {
@@ -512,7 +513,13 @@ async function runScanJob(jobId: string) {
         aiJobs.set(aiJobId, { status: "processing", total: aiFiles.length, processed: 0, results: [], startedAt: Date.now() });
         job.autoAiJobId = aiJobId;
         runAiJob(aiJobId, aiFiles, jobId).catch(() => {});
+      } else {
+        // No unresolved — auto-rename ready files now
+        autoRenameReady(job, jobId);
       }
+    } else {
+      // No AI key — auto-rename ready files now
+      autoRenameReady(job, jobId);
     }
   } catch (err: any) {
     job.status = "error";
@@ -577,6 +584,19 @@ async function runAiJob(aiJobId: string, files: Array<{ path: string; originalNa
       }
     });
     aiJob.status = "done";
+
+    // Auto-rename all ready files after AI completes
+    if (scanJobId && jobs.has(scanJobId)) {
+      const scanJob = jobs.get(scanJobId)!;
+      const readyFiles = scanJob.files.filter((f) => f.status === "ready" && f.newName);
+      if (readyFiles.length > 0) {
+        const renameId = String(++renameJobCounter);
+        const filesToRename = readyFiles.map((f) => ({ path: f.path, newName: f.newName! }));
+        renameJobs.set(renameId, { status: "processing", total: filesToRename.length, processed: 0, results: [], startedAt: Date.now() });
+        scanJob.autoRenameJobId = renameId;
+        runRenameJob(renameId, filesToRename).catch(() => {});
+      }
+    }
   } catch (err: any) {
     aiJob.status = "error";
     aiJob.error = err.message;
@@ -584,6 +604,17 @@ async function runAiJob(aiJobId: string, files: Array<{ path: string; originalNa
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
+
+function autoRenameReady(job: ScanJob, jobId: string) {
+  const readyFiles = job.files.filter((f) => f.status === "ready" && f.newName);
+  if (readyFiles.length > 0) {
+    const renameId = String(++renameJobCounter);
+    const filesToRename = readyFiles.map((f) => ({ path: f.path, newName: f.newName! }));
+    renameJobs.set(renameId, { status: "processing", total: filesToRename.length, processed: 0, results: [], startedAt: Date.now() });
+    job.autoRenameJobId = renameId;
+    runRenameJob(renameId, filesToRename).catch(() => {});
+  }
+}
 
 router.post("/dropbox/scan/start", (_req: Request, res: Response) => {
   const jobId = String(++jobCounter);
@@ -633,28 +664,54 @@ setInterval(() => {
 
 async function runRenameJob(renameJobId: string, files: Array<{ path: string; newName: string }>) {
   const job = renameJobs.get(renameJobId)!;
-  const tasks = files.map((f) => async () => {
-    try {
-      const dir = f.path.substring(0, f.path.lastIndexOf("/"));
-      const newPath = `${dir}/${f.newName}`;
-      if (f.path.toLowerCase() === newPath.toLowerCase()) return { path: f.path, newName: f.newName, status: "skipped", reason: "same name" };
-      await dropboxMoveWithRetry(f.path, newPath);
-      return { path: f.path, newPath, newName: f.newName, status: "renamed" };
-    } catch (err: any) {
-      return { path: f.path, newName: f.newName, status: "error", error: err.message };
-    }
-  });
 
-  try {
-    await runWithConcurrency(tasks, 5, (result) => {
-      job.processed++;
-      job.results.push(result);
+  let remaining = files;
+  let round = 0;
+  const maxRounds = 3;
+
+  while (remaining.length > 0 && round < maxRounds) {
+    if (round > 0) {
+      // Wait before retry round — exponential backoff
+      await sleep(round * 30000); // 30s, 60s
+    }
+
+    const retryList: Array<{ path: string; newName: string }> = [];
+
+    const tasks = remaining.map((f) => async () => {
+      try {
+        const dir = f.path.substring(0, f.path.lastIndexOf("/"));
+        const newPath = `${dir}/${f.newName}`;
+        if (f.path.toLowerCase() === newPath.toLowerCase()) return { path: f.path, newName: f.newName, status: "skipped", reason: "same name", _retry: false };
+        await dropboxMoveWithRetry(f.path, newPath);
+        return { path: f.path, newPath, newName: f.newName, status: "renamed", _retry: false };
+      } catch (err: any) {
+        const is429 = err?.message?.includes("429") || err?.status === 429;
+        if (is429) {
+          retryList.push(f);
+          return { path: f.path, newName: f.newName, status: "pending_retry", error: "429 - will retry", _retry: true };
+        }
+        return { path: f.path, newName: f.newName, status: "error", error: err.message, _retry: false };
+      }
     });
-    job.status = "done";
-  } catch (err: any) {
-    job.status = "error";
-    job.error = err.message;
+
+    await runWithConcurrency(tasks, 5, (result) => {
+      if (!result._retry) {
+        job.processed++;
+        job.results.push(result);
+      }
+    });
+
+    remaining = retryList;
+    round++;
   }
+
+  // Any still remaining after all rounds — mark as error
+  for (const f of remaining) {
+    job.processed++;
+    job.results.push({ path: f.path, newName: f.newName, status: "error", error: "429 after all retries" });
+  }
+
+  job.status = "done";
 }
 
 router.post("/dropbox/rename/start", (req: Request, res: Response) => {
