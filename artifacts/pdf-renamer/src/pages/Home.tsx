@@ -479,6 +479,8 @@ export default function Home() {
               </button>
             )}
           </div>
+        </div>
+      </header>
 
       <main className="max-w-6xl mx-auto px-6 py-5 space-y-4">
         {/* Progress bar */}
