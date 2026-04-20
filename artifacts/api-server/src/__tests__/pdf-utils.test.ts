@@ -45,6 +45,17 @@ describe("buildNewName", () => {
   it("returns null if customer becomes empty after sanitize", () => {
     expect(buildNewName({ customer: "©®™", customerDrawingNo: "123", orderNo: "456789" })).toBeNull();
   });
+  it("returns null if orderNo is not 5-8 digits", () => {
+    expect(buildNewName({ customer: "Test", customerDrawingNo: "ABC123", orderNo: "123" })).toBeNull();
+    expect(buildNewName({ customer: "Test", customerDrawingNo: "ABC123", orderNo: "123456789" })).toBeNull();
+    expect(buildNewName({ customer: "Test", customerDrawingNo: "ABC123", orderNo: "abc" })).toBeNull();
+  });
+  it("returns null if customer has no 3 consecutive letters", () => {
+    expect(buildNewName({ customer: "1S", customerDrawingNo: "ABC123", orderNo: "123456" })).toBeNull();
+  });
+  it("returns null if customerDrawingNo is too short", () => {
+    expect(buildNewName({ customer: "TestCo", customerDrawingNo: "AB", orderNo: "123456" })).toBeNull();
+  });
   it("returns null if all fields are null", () => {
     expect(buildNewName({ customer: null, customerDrawingNo: null, orderNo: null })).toBeNull();
   });

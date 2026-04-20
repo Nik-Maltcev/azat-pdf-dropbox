@@ -149,12 +149,17 @@ function transliterateGerman(s: string): string {
 function buildNewName(fields: PdfFields): string | null {
   const { customer, customerDrawingNo, orderNo } = fields;
   if (!customer || !customerDrawingNo || !orderNo) return null;
+  // Validate orderNo: must be 5-8 digits
+  if (!/^\d{5,8}$/.test(orderNo)) return null;
+  // Validate customer: must have at least 3 consecutive letters
+  if (!/[A-Za-zÄÖÜäöüß]{3}/.test(customer)) return null;
+  // Validate customerDrawingNo: at least 3 chars with alphanumeric content
+  if (customerDrawingNo.length < 3 || !/[A-Za-z0-9]{2}/.test(customerDrawingNo)) return null;
   const safe = (s: string) => transliterateGerman(s).replace(/[^A-Za-z0-9_-]/g, "").trim();
   const c = safe(customer);
   const d = safe(customerDrawingNo);
   const o = safe(orderNo);
-  // Guard against empty segments
-  if (!c || !d || !o) return null;
+  if (!c || c.length < 3 || !d || d.length < 3 || !o) return null;
   return `${c}_${d}_${o}.pdf`;
 }
 
@@ -227,7 +232,7 @@ function extractFieldsFromText(text: string): PdfFields {
   return { customer, customerDrawingNo, orderNo };
 }
 
-// ── AI extraction ───────────────────────────────────────────────────────────
+// ── AI extraction (GPT-4o-mini text / GPT-4o vision) ────────────────────────
 
 async function extractFieldsWithAI(text: string): Promise<PdfFields> {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -255,15 +260,144 @@ async function extractFieldsWithAI(text: string): Promise<PdfFields> {
   } catch { return { customer: null, customerDrawingNo: null, orderNo: null }; }
 }
 
+async function extractFieldsWithVision(pdfBuffer: Buffer): Promise<PdfFields> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return { customer: null, customerDrawingNo: null, orderNo: null };
+
+  // Convert PDF first page to PNG
+  const { execFile } = await import("child_process");
+  const { writeFile, readFile: fsReadFile, unlink, mkdtemp } = await import("fs/promises");
+  const { tmpdir } = await import("os");
+  const { join } = await import("path");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
+
+  const dir = await mkdtemp(join(tmpdir(), "vision-"));
+  const pdfPath = join(dir, "input.pdf");
+  const imgPrefix = join(dir, "page");
+
+  try {
+    await writeFile(pdfPath, pdfBuffer);
+    await execFileAsync("pdftoppm", ["-png", "-f", "1", "-l", "1", "-r", "200", pdfPath, imgPrefix]);
+
+    const { readdir } = await import("fs/promises");
+    const files = await readdir(dir);
+    const imgFile = files.find((f) => f.startsWith("page") && f.endsWith(".png"));
+    if (!imgFile) return { customer: null, customerDrawingNo: null, orderNo: null };
+
+    const imgBuffer = await fsReadFile(join(dir, imgFile));
+    const base64 = imgBuffer.toString("base64");
+
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-4o", temperature: 0, max_tokens: 200,
+        messages: [
+          { role: "system", content: `Extract from this Walterscheid technical drawing:\n- customer: company name (für Kunde / for customer / pour client)\n- customerDrawingNo: customer drawing number (Kundenzeichnungs-Nr)\n- orderNo: order number (Bestell-Nr / Part No), typically 5-8 digits\n\nReturn ONLY valid JSON. Use null for missing fields.` },
+          { role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${base64}`, detail: "low" } }] },
+        ],
+      }),
+    });
+
+    if (!res.ok) return { customer: null, customerDrawingNo: null, orderNo: null };
+    const json = await res.json();
+    const content = json.choices?.[0]?.message?.content?.trim();
+    if (!content) return { customer: null, customerDrawingNo: null, orderNo: null };
+    const clean = content.replace(/^```json?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+    const parsed = JSON.parse(clean);
+    return { customer: parsed.customer || null, customerDrawingNo: parsed.customerDrawingNo || null, orderNo: parsed.orderNo || null };
+  } catch {
+    return { customer: null, customerDrawingNo: null, orderNo: null };
+  } finally {
+    try {
+      const { readdir } = await import("fs/promises");
+      const files = await readdir(dir);
+      for (const f of files) await unlink(join(dir, f)).catch(() => {});
+      const { rmdir } = await import("fs/promises");
+      await rmdir(dir).catch(() => {});
+    } catch {}
+  }
+}
+
+// ── Tesseract OCR (free, local) ─────────────────────────────────────────────
+
+async function extractTextWithTesseract(pdfBuffer: Buffer): Promise<string> {
+  const { execFile } = await import("child_process");
+  const { writeFile, readFile: fsReadFile, unlink, mkdtemp } = await import("fs/promises");
+  const { tmpdir } = await import("os");
+  const { join } = await import("path");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
+
+  const dir = await mkdtemp(join(tmpdir(), "ocr-"));
+  const pdfPath = join(dir, "input.pdf");
+  const imgPrefix = join(dir, "page");
+
+  try {
+    await writeFile(pdfPath, pdfBuffer);
+
+    // Convert first page of PDF to PNG using pdftoppm
+    await execFileAsync("pdftoppm", ["-png", "-f", "1", "-l", "1", "-r", "300", pdfPath, imgPrefix]);
+
+    // Find the generated image
+    const { readdir } = await import("fs/promises");
+    const files = await readdir(dir);
+    const imgFile = files.find((f) => f.startsWith("page") && f.endsWith(".png"));
+    if (!imgFile) return "";
+
+    const imgPath = join(dir, imgFile);
+
+    // Run Tesseract OCR
+    const { stdout } = await execFileAsync("tesseract", [imgPath, "-", "-l", "deu+eng+fra"]);
+    return stdout;
+  } catch {
+    return "";
+  } finally {
+    // Cleanup temp files
+    const { readdir } = await import("fs/promises");
+    try {
+      const files = await readdir(dir);
+      for (const f of files) await unlink(join(dir, f)).catch(() => {});
+      const { rmdir } = await import("fs/promises");
+      await rmdir(dir).catch(() => {});
+    } catch {}
+  }
+}
+
 // ── Process one PDF ─────────────────────────────────────────────────────────
 
 async function processOnePdf(file: { path_lower: string; name: string; id: string }): Promise<ProcessedFile> {
   try {
     const buffer = await downloadWithRetry(file.path_lower);
+
+    // Step 1: Try pdf-parse (fast, text-layer extraction)
     const parsed = await pdfParse(buffer);
-    const fields = extractFieldsFromText(parsed.text.normalize("NFC"));
-    const newName = buildNewName(fields);
-    return { id: file.id, originalName: file.name, path: file.path_lower, fields, newName, status: newName ? "ready" : "unresolved" };
+    const text1 = parsed.text.normalize("NFC");
+    const fields1 = extractFieldsFromText(text1);
+    const name1 = buildNewName(fields1);
+    if (name1) {
+      return { id: file.id, originalName: file.name, path: file.path_lower, fields: fields1, newName: name1, status: "ready" };
+    }
+
+    // Step 2: Try Tesseract OCR (free, image-based)
+    const text2 = await extractTextWithTesseract(buffer);
+    if (text2.length > 20) {
+      const fields2 = extractFieldsFromText(text2.normalize("NFC"));
+      // Merge: prefer pdf-parse results, fill gaps with Tesseract
+      const merged = {
+        customer: fields1.customer || fields2.customer,
+        customerDrawingNo: fields1.customerDrawingNo || fields2.customerDrawingNo,
+        orderNo: fields1.orderNo || fields2.orderNo,
+      };
+      const name2 = buildNewName(merged);
+      if (name2) {
+        return { id: file.id, originalName: file.name, path: file.path_lower, fields: merged, newName: name2, status: "ready" };
+      }
+      return { id: file.id, originalName: file.name, path: file.path_lower, fields: merged, newName: null, status: "unresolved" };
+    }
+
+    return { id: file.id, originalName: file.name, path: file.path_lower, fields: fields1, newName: null, status: "unresolved" };
   } catch (err: any) {
     return { id: file.id, originalName: file.name, path: file.path_lower, fields: { customer: null, customerDrawingNo: null, orderNo: null }, newName: null, status: "error", error: err.message };
   }
@@ -392,14 +526,29 @@ async function runAiJob(aiJobId: string, files: Array<{ path: string; originalNa
     try {
       const buffer = await downloadWithRetry(f.path);
       const parsed = await pdfParse(buffer);
-      const aiFields = await extractFieldsWithAI(parsed.text.normalize("NFC"));
-      const merged: PdfFields = {
+      const normalizedText = parsed.text.normalize("NFC");
+
+      // Step 1: GPT-4o-mini (text-based, cheap)
+      const aiFields = await extractFieldsWithAI(normalizedText);
+      const merged1: PdfFields = {
         customer: f.fields.customer || aiFields.customer,
         customerDrawingNo: f.fields.customerDrawingNo || aiFields.customerDrawingNo,
         orderNo: f.fields.orderNo || aiFields.orderNo,
       };
-      const newName = buildNewName(merged);
-      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged, newName, status: newName ? "ready" : "unresolved" } as ProcessedFile;
+      const name1 = buildNewName(merged1);
+      if (name1) {
+        return { id: f.id, originalName: f.originalName, path: f.path, fields: merged1, newName: name1, status: "ready" } as ProcessedFile;
+      }
+
+      // Step 2: GPT-4o vision (image-based, more expensive but accurate)
+      const visionFields = await extractFieldsWithVision(buffer);
+      const merged2: PdfFields = {
+        customer: merged1.customer || visionFields.customer,
+        customerDrawingNo: merged1.customerDrawingNo || visionFields.customerDrawingNo,
+        orderNo: merged1.orderNo || visionFields.orderNo,
+      };
+      const name2 = buildNewName(merged2);
+      return { id: f.id, originalName: f.originalName, path: f.path, fields: merged2, newName: name2, status: name2 ? "ready" : "unresolved" } as ProcessedFile;
     } catch (err: any) {
       return { id: f.id, originalName: f.originalName, path: f.path, fields: f.fields, newName: null, status: "error", error: err.message } as ProcessedFile;
     }

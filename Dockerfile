@@ -42,6 +42,11 @@ FROM node:20-slim AS runner
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
+# Install Tesseract OCR + German/English/French language packs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr tesseract-ocr-deu tesseract-ocr-fra poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy everything from builder (simpler, avoids workspace resolution issues)
