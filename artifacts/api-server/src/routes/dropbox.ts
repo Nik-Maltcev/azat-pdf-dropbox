@@ -149,17 +149,11 @@ function transliterateGerman(s: string): string {
 function buildNewName(fields: PdfFields): string | null {
   const { customer, customerDrawingNo, orderNo } = fields;
   if (!customer || !customerDrawingNo || !orderNo) return null;
-  // Validate orderNo: must be 5-8 digits
-  if (!/^\d{5,8}$/.test(orderNo)) return null;
-  // Validate customer: must have at least 3 consecutive letters
-  if (!/[A-Za-zÄÖÜäöüß]{3}/.test(customer)) return null;
-  // Validate customerDrawingNo: at least 3 chars with alphanumeric content
-  if (customerDrawingNo.length < 3 || !/[A-Za-z0-9]{2}/.test(customerDrawingNo)) return null;
   const safe = (s: string) => transliterateGerman(s).replace(/[^A-Za-z0-9_-]/g, "").trim();
   const c = safe(customer);
   const d = safe(customerDrawingNo);
   const o = safe(orderNo);
-  if (!c || c.length < 3 || !d || d.length < 3 || !o) return null;
+  if (!c || !d || !o) return null;
   return `${c}_${d}_${o}.pdf`;
 }
 
