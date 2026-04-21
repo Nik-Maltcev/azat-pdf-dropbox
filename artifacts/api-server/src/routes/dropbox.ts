@@ -462,12 +462,12 @@ const aiJobs = new Map<string, AiJob>();
 let jobCounter = 0;
 let aiJobCounter = 0;
 
-// Clean up jobs older than 2 hours every 10 minutes
+// Clean up jobs older than 24 hours every 30 minutes
 setInterval(() => {
-  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [id, job] of jobs) { if (job.startedAt < cutoff) jobs.delete(id); }
   for (const [id, job] of aiJobs) { if (job.startedAt < cutoff) aiJobs.delete(id); }
-}, 10 * 60 * 1000);
+}, 30 * 60 * 1000);
 
 // ── Background scan job ─────────────────────────────────────────────────────
 
@@ -658,9 +658,9 @@ let renameJobCounter = 0;
 
 // Clean up rename jobs too
 setInterval(() => {
-  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [id, job] of renameJobs) { if (job.startedAt < cutoff) renameJobs.delete(id); }
-}, 10 * 60 * 1000);
+}, 30 * 60 * 1000);
 
 async function runRenameJob(renameJobId: string, files: Array<{ path: string; newName: string }>) {
   const job = renameJobs.get(renameJobId)!;
